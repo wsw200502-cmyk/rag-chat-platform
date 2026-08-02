@@ -48,3 +48,7 @@ spring-boot-app/target/
 # OS
 .DS_Store
 Thumbs.db
+
+# pytest
+.pytest_cache/
+
