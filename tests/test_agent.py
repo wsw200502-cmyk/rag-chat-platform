@@ -4,7 +4,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 
-
 def test_tool_registry():
     """工具注册表能正常注册和获取"""
 

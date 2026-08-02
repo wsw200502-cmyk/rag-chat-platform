@@ -19,9 +19,7 @@ load_dotenv(env_path, override=True)
 # 如果 load_dotenv 因 BOM 头解析失败，手动解析兜底
 if not os.getenv("TAVILY_API_KEY"):
     try:
-        with open(
-            env_path, "r", encoding="utf-8-sig"
-        ) as f:  # utf-8-sig 自动去掉 BOM 头
+        with open(env_path, "r", encoding="utf-8-sig") as f:  # utf-8-sig 自动去掉 BOM 头
             for line in f:
                 line = line.strip()
                 if line and not line.startswith("#") and "=" in line:
@@ -63,9 +61,7 @@ logging.basicConfig(
 logger = logging.getLogger("agent_api")
 
 if not TAVILY_API_KEY:
-    logger.warning(
-        "TAVILY_API_KEY 未设置，网络搜索功能将不可用。若需使用，请复制 .env.example 为 .env 并填入 Key。"
-    )
+    logger.warning("TAVILY_API_KEY 未设置，网络搜索功能将不可用。若需使用，请复制 .env.example 为 .env 并填入 Key。")
 
 # ==================== 模型缓存 ====================
 llm_cache = {}
@@ -187,9 +183,7 @@ def retrieve_with_hybrid_and_rerank(
     if bm25_index is not None:
         tokenized_query = query.split()
         bm25_scores = bm25_index.get_scores(tokenized_query)
-        top_indices = sorted(
-            range(len(bm25_scores)), key=lambda i: bm25_scores[i], reverse=True
-        )[:k_bm25]
+        top_indices = sorted(range(len(bm25_scores)), key=lambda i: bm25_scores[i], reverse=True)[:k_bm25]
         for idx in top_indices:
             bm25_docs.append(Document(page_content=global_documents_text[idx]))
 
@@ -201,9 +195,7 @@ def retrieve_with_hybrid_and_rerank(
     doc_texts = [doc.page_content for doc in all_docs]
     pairs = [[query, text] for text in doc_texts]
     scores = model.predict(pairs)
-    sorted_indices = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[
-        :final_k
-    ]
+    sorted_indices = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:final_k]
     return [list(all_docs)[i] for i in sorted_indices]
 
 
@@ -226,11 +218,7 @@ def build_messages(
         符合 LangChain 格式的消息对象列表。
     """
     local_docs = retrieve_with_hybrid_and_rerank(question)
-    local_context = (
-        "\n".join([doc.page_content for doc in local_docs])
-        if local_docs
-        else "无相关本地知识"
-    )
+    local_context = "\n".join([doc.page_content for doc in local_docs]) if local_docs else "无相关本地知识"
     web_context = "网络搜索不可用（未配置 API Key）"
     if search is not None:
         try:
@@ -279,16 +267,10 @@ def post_process(content: str, question: str) -> str:
     content = re.sub(r"(from\s+\S+\s+import\s+\S+)([a-zA-Z])", r"\1\n\2", content)
     content = re.sub(r"([a-zA-Z_]\s*=\s*)(def |class |import )", r"\1\n\2", content)
 
-    if (
-        any(kw in content for kw in ["import ", "def ", "print(", "class "])
-        and "```" not in content
-    ):
+    if any(kw in content for kw in ["import ", "def ", "print(", "class "]) and "```" not in content:
         content = f"```python\n{content.strip()}\n```"
 
-    if any(
-        kw in question
-        for kw in ["只输出代码", "只给我代码", "只要代码", "去掉所有文本", "我只要代码"]
-    ):
+    if any(kw in question for kw in ["只输出代码", "只给我代码", "只要代码", "去掉所有文本", "我只要代码"]):
         code_blocks = re.findall(r"```(?:\w+)?\n(.*?)\n```", content, re.DOTALL)
         if code_blocks:
             return code_blocks[0].strip()
@@ -337,9 +319,7 @@ def generate_collaborative(question: str, history: list[dict[str, str]]) -> str:
     executor = get_llm("qwen2.5:7b")
     messages = build_messages(optimized_query, history)
     messages[-1] = HumanMessage(
-        content=(
-            f"根据资料回答用户问题。\n用户问题：{question}\n优化提示词：{optimized_query}"
-        )
+        content=(f"根据资料回答用户问题。\n用户问题：{question}\n优化提示词：{optimized_query}")
     )
     final_response = executor.invoke(messages)
     return final_response.content
@@ -386,9 +366,7 @@ async def chat_stream(req: ChatRequest):
                 yield f"data: {data}\n\n"
         yield "data: [DONE]\n\n"
 
-    return StreamingResponse(
-        event_stream(), media_type="text/event-stream; charset=utf-8"
-    )
+    return StreamingResponse(event_stream(), media_type="text/event-stream; charset=utf-8")
 
 
 @app.post("/chat/multi")
@@ -422,20 +400,18 @@ async def chat_review(req: ChatRequest):
             except Exception as e:
                 if "502" in str(e) and attempt < max_retries - 1:
                     wait_time = 2**attempt + 15
-                    logger.warning(
-                        f"LLM调用失败(502)，等待 {wait_time}s 重试 {attempt + 1}/{max_retries - 1}"
-                    )
+                    logger.warning(f"LLM调用失败(502)，等待 {wait_time}s 重试 {attempt + 1}/{max_retries - 1}")
                     time.sleep(wait_time)
                     continue
                 else:
                     raise e
 
     decomposer = get_llm(models[0])
-    decomp_prompt = f"你是需求分析专家。将用户需求分解为清晰步骤并生成优化提示词。只输出优化提示词。\n用户需求：{req.message}"
+    decomp_prompt = (
+        f"你是需求分析专家。将用户需求分解为清晰步骤并生成优化提示词。只输出优化提示词。\n用户需求：{req.message}"
+    )
     try:
-        decomp_resp = await asyncio.to_thread(
-            robust_llm_call, decomposer, [HumanMessage(content=decomp_prompt)]
-        )
+        decomp_resp = await asyncio.to_thread(robust_llm_call, decomposer, [HumanMessage(content=decomp_prompt)])
         optimized_query = decomp_resp.content.strip()
     except Exception as e:
         return ChatResponse(response=f"需求解耦失败: {e!s}")
@@ -458,9 +434,7 @@ async def chat_review(req: ChatRequest):
         f"审查结果（PASS 或 FAIL: ...）："
     )
     try:
-        review_resp = await asyncio.to_thread(
-            robust_llm_call, reviewer, [HumanMessage(content=review_prompt)]
-        )
+        review_resp = await asyncio.to_thread(robust_llm_call, reviewer, [HumanMessage(content=review_prompt)])
         review_result = review_resp.content.strip()
     except Exception as e:
         review_result = f"审查出错: {e!s}"
@@ -505,16 +479,10 @@ def generate_hypothetical_answer(question: str, model_name: str = "qwen2.5:14b")
     return resp.content.strip()
 
 
-def hyde_retrieve_and_answer(
-    question: str, history: list[dict[str, str]], model_name: str = "qwen2.5:14b"
-) -> str:
+def hyde_retrieve_and_answer(question: str, history: list[dict[str, str]], model_name: str = "qwen2.5:14b") -> str:
     hypothetical = generate_hypothetical_answer(question)
     local_docs = retrieve_with_hybrid_and_rerank(hypothetical)
-    local_context = (
-        "\n".join([doc.page_content for doc in local_docs])
-        if local_docs
-        else "无相关本地知识"
-    )
+    local_context = "\n".join([doc.page_content for doc in local_docs]) if local_docs else "无相关本地知识"
 
     messages = [
         SystemMessage(
@@ -535,11 +503,7 @@ def hyde_retrieve_and_answer(
             messages.append(HumanMessage(content=content))
         elif role == "assistant":
             messages.append(AIMessage(content=content))
-    messages.append(
-        HumanMessage(
-            content=f"[本地知识库（基于假设答案检索）]\n{local_context}\n\n用户问题：{question}"
-        )
-    )
+    messages.append(HumanMessage(content=f"[本地知识库（基于假设答案检索）]\n{local_context}\n\n用户问题：{question}"))
 
     llm = get_llm(model_name)
     resp = llm.invoke(messages)
@@ -549,9 +513,7 @@ def hyde_retrieve_and_answer(
 @app.post("/chat/hyde")
 async def chat_hyde(req: ChatRequest):
     try:
-        answer = await asyncio.to_thread(
-            hyde_retrieve_and_answer, req.message, req.history, req.model
-        )
+        answer = await asyncio.to_thread(hyde_retrieve_and_answer, req.message, req.history, req.model)
         return ChatResponse(response=answer)
     except Exception as e:
         logger.error(f"HyDE 请求失败: {e!s}")
@@ -624,9 +586,7 @@ def self_rag_answer(
         content = response.content.strip()
         messages.append(AIMessage(content=content))
 
-        retrieve_match = re.search(
-            r"<RETRIEVE>\s*(.*?)\s*</RETRIEVE>", content, re.DOTALL
-        )
+        retrieve_match = re.search(r"<RETRIEVE>\s*(.*?)\s*</RETRIEVE>", content, re.DOTALL)
         reject_match = re.search(r"<REJECT>", content)
 
         if retrieve_match:
@@ -643,11 +603,7 @@ def self_rag_answer(
                     context += "\n\n网络搜索结果：\n" + str(web_results)
                 except Exception as e:
                     logger.warning(f"网络搜索失败: {e}")
-            messages.append(
-                HumanMessage(
-                    content=f"检索结果：\n{context}\n\n请根据检索结果继续回答，或继续检索。"
-                )
-            )
+            messages.append(HumanMessage(content=f"检索结果：\n{context}\n\n请根据检索结果继续回答，或继续检索。"))
         elif reject_match or not retrieve_match:
             break
         else:
@@ -695,9 +651,7 @@ class ToolRegistry:
         return self._tools.get(name)
 
     def get_all_descriptions(self) -> str:
-        return "\n".join(
-            [f"- {name}: {desc}" for name, desc in self._descriptions.items()]
-        )
+        return "\n".join([f"- {name}: {desc}" for name, desc in self._descriptions.items()])
 
 
 tool_registry = ToolRegistry()
@@ -750,9 +704,7 @@ class WorkingMemory:
 class EpisodicMemory:
     events: list[dict[str, Any]] = field(default_factory=list)
 
-    def add(
-        self, step: int, action: str, input_str: str, output: str, reflection: str = ""
-    ):
+    def add(self, step: int, action: str, input_str: str, output: str, reflection: str = ""):
         self.events.append(
             {
                 "step": step,
@@ -788,9 +740,7 @@ class ReflexionModule:
     def __init__(self, model_name: str = "qwen2.5:7b"):
         self.model_name = model_name
 
-    def reflect(
-        self, goal: str, action: str, input_str: str, observation: str, history: str
-    ) -> str:
+    def reflect(self, goal: str, action: str, input_str: str, observation: str, history: str) -> str:
         prompt = (
             f"你刚刚执行了一个动作但结果不理想（工具抛出异常或执行失败）。\n"
             f"目标：{goal}\n"
@@ -826,9 +776,7 @@ class RobustAgentExecutor:
         self.reflexion = ReflexionModule(model_name)
         self.long_term = LongTermMemory()
 
-    async def _plan_subtasks(
-        self, user_message: str, history: list[dict]
-    ) -> list[dict[str, Any]]:
+    async def _plan_subtasks(self, user_message: str, history: list[dict]) -> list[dict[str, Any]]:
         history_text = ""
         if history:
             for msg in history[-4:]:
@@ -931,13 +879,9 @@ class RobustAgentExecutor:
                 if not deps_satisfied:
                     task["status"] = "skipped"
                     continue
-                result = await self._execute_single_task(
-                    task, working, episodic, history
-                )
+                result = await self._execute_single_task(task, working, episodic, history)
                 task["result"] = result
-                task["status"] = (
-                    "completed" if not result.startswith("失败") else "failed"
-                )
+                task["status"] = "completed" if not result.startswith("失败") else "failed"
                 all_results.append(f"[{task['description']}] {result}")
             return await self._synthesize(user_message, working, episodic, all_results)
 
@@ -998,11 +942,7 @@ class RobustAgentExecutor:
                 call_sig = f"{tool_name}:{tool_input}"
                 repeat_count = sum(1 for u in used_tools[-6:] if u == call_sig)
                 if repeat_count >= 2:
-                    messages.append(
-                        HumanMessage(
-                            content="你已经重复调用同一工具多次，请立即输出 final 答案。"
-                        )
-                    )
+                    messages.append(HumanMessage(content="你已经重复调用同一工具多次，请立即输出 final 答案。"))
                     continue
                 used_tools.append(call_sig)
 
@@ -1023,9 +963,7 @@ class RobustAgentExecutor:
                         success = False
 
                 self.long_term.record_tool_result(tool_name, success)
-                logger.info(
-                    f"[{task['description'][:20]}] 工具 {tool_name} -> {'成功' if success else '失败'}"
-                )
+                logger.info(f"[{task['description'][:20]}] 工具 {tool_name} -> {'成功' if success else '失败'}")
 
                 reflection = ""
                 if not success:
@@ -1050,9 +988,7 @@ class RobustAgentExecutor:
                 working.intermediate_results[f"{tool_name}_{step}"] = observation
             else:
                 messages.append(
-                    HumanMessage(
-                        content='请立即输出 final 答案，格式：{"final": "..."} 或 Final Answer: ...'
-                    )
+                    HumanMessage(content='请立即输出 final 答案，格式：{"final": "..."} 或 Final Answer: ...')
                 )
 
         if last_tool_result:
@@ -1104,7 +1040,5 @@ if __name__ == "__main__":
             time.sleep(3)
     else:
         print("嵌入模型预热最终失败，将在第一次请求时自动重试")
-    print(
-        "🚀 智能助手已启动，支持混合检索+Reranker+多模型协作+链式审查+ReAct Agent+HyDE+Self-RAG"
-    )
+    print("🚀 智能助手已启动，支持混合检索+Reranker+多模型协作+链式审查+ReAct Agent+HyDE+Self-RAG")
     uvicorn.run(app, host="0.0.0.0", port=8000)
