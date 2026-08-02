@@ -1,0 +1,66 @@
+/* 全局字体 */
+:root {
+  --sans: system-ui, 'Segoe UI', Roboto, sans-serif;
+  --mono: ui-monospace, Consolas, monospace;
+  font-family: var(--sans);
+}
+
+body {
+  margin: 0;
+}
+
+/* 侧边栏删除按钮交互 */
+[class*="del-btn"] {
+  display: none;
+}
+div:hover > [class*="del-btn"] {
+  display: block;
+}
+[class*="del-btn"]:hover {
+  color: #ff6b6b;
+}
+
+/* 基础代码样式 */
+code {
+  font-family: var(--mono);
+  background: #f4f3ec;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 0.9em;
+}
+
+/* 滚动条美化 */
+::-webkit-scrollbar {
+  width: 6px;
+}
+::-webkit-scrollbar-thumb {
+  background: #ccc;
+  border-radius: 10px;
+}
+
+/* ========== 背景透明度控制 ========== */
+.chat-area-with-bg {
+  position: relative;
+  overflow: hidden;
+}
+
+.chat-area-with-bg::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background-image: url('https://ts1.tc.mm.bing.net/th/id/R-C.ac7a98bcf6c5b26dfb4e28b020651019?rik=1zOVnlW3IbHDLg&riu=http%3a%2f%2fwww.niulol.com%2fd%2ffile%2fbigpic%2f2020%2f09%2f18%2f17%2fsklsag3z5vm2241.jpg&ehk=CkRtlJEboZ2pw4OcLFP6FwxA4V4FwIy5fD9wIQsxQ8Y%3d&risl=&pid=ImgRaw&r=0');
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+  opacity: 0.3; /* ← 背景透明度：0完全透明，1完全清晰，建议0.2~0.4 */
+  z-index: 0;
+}
+
+/* 确保内容在背景上方 */
+.chat-area-with-bg > * {
+  position: relative;
+  z-index: 1;
+}

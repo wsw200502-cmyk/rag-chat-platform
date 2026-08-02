@@ -1,0 +1,15 @@
+﻿fastapi
+uvicorn
+pydantic
+python-dotenv
+langchain
+langchain-ollama
+langchain-chroma
+langchain-community
+langchain-text-splitters
+langchain-core
+langchain-tavily
+chromadb
+rank-bm25
+sentence-transformers
+torch --index-url https://download.pytorch.org/whl/cpu

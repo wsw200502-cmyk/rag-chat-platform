@@ -1,0 +1,110 @@
+import os
+os.environ["TAVILY_API_KEY"] = "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"   # 替换为真实密钥
+
+from fastapi import FastAPI
+from pydantic import BaseModel
+import uvicorn
+
+from langchain_ollama import ChatOllama, OllamaEmbeddings
+from langchain_tavily import TavilySearch
+from langchain_chroma import Chroma
+from langchain_community.document_loaders import PyPDFLoader, TextLoader
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_core.messages import HumanMessage, SystemMessage
+
+# ========== 模型初始化 ==========
+import os   # 如果文件开头没有 import os，请加上
+ollama_host = os.getenv("OLLAMA_HOST", "http://localhost:11434")
+
+llm = ChatOllama(
+    model="llama3.1:8b",
+    temperature=0,
+    base_url=ollama_host
+)
+# 嵌入模型（用于知识库检索）
+embedding = OllamaEmbeddings(
+    model="nomic-embed-text",
+    base_url="http://localhost:11434"
+)
+
+# ========== 向量数据库（持久化到D盘，自动加载已有数据）==========
+vectorstore = Chroma(
+    persist_directory="./chroma_db",
+    embedding_function=embedding
+)
+
+# ========== 网络搜索工具（如不需要可注释掉）==========
+search = TavilySearch(
+    api_key=os.environ["TAVILY_API_KEY"],
+    max_results=3
+)
+
+# ========== 文档导入工具（供后台使用）==========
+def add_documents_to_store(file_paths):
+    docs = []
+    for path in file_paths:
+        if path.endswith(".pdf"):
+            loader = PyPDFLoader(path)
+        else:
+            loader = TextLoader(path, encoding="utf-8")
+        docs.extend(loader.load())
+    splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
+    chunks = splitter.split_documents(docs)
+    vectorstore.add_documents(chunks)
+    return len(chunks)
+
+# ========== 核心问答函数 ==========
+def generate_answer(question: str) -> str:
+    # 1. 从本地知识库检索相关文档
+    local_docs = vectorstore.similarity_search(question, k=3)
+    local_context = "\n".join([doc.page_content for doc in local_docs])
+    
+    # 2. 网络搜索（如不需要实时信息可注释）
+    try:
+        web_results = search.invoke(question)
+        web_context = str(web_results)
+    except:
+        web_context = "网络搜索不可用"
+    
+    # 3. 构建灵活的系统提示词，允许模型在资料不足时使用自身知识
+    system = SystemMessage(
+        content=(
+            "你是智能助手，请结合提供的资料和你的自身知识回答用户问题。\n"
+            "规则：\n"
+            "1. 如果【本地知识库内容】或【网络搜索结果】中包含相关信息，请优先基于这些资料回答，并说明信息来源。\n"
+            "2. 如果资料与问题无关或资料为空，请直接使用你的通用知识给出准确、有帮助的回答，不要拒绝回答。\n"
+            "3. 始终保持友好、专业，用中文回复。"
+        )
+    )
+    user = HumanMessage(
+        content=f"【本地知识库内容】\n{local_context}\n\n"
+                f"【网络搜索结果】\n{web_context}\n\n"
+                f"用户问题：{question}"
+    )
+    
+    response = llm.invoke([system, user])
+    return response.content
+
+# ========== FastAPI 接口 ==========
+app = FastAPI(title="智能助手 (带私有知识库)")
+
+class ChatRequest(BaseModel):
+    message: str
+
+class ChatResponse(BaseModel):
+    response: str
+
+@app.post("/chat", response_model=ChatResponse)
+async def chat(req: ChatRequest):
+    answer = generate_answer(req.message)
+    return ChatResponse(response=answer)
+
+@app.post("/add_docs")
+async def add_docs(files: list[str]):
+    """上传文档路径列表，加入知识库"""
+    count = add_documents_to_store(files)
+    return {"status": "success", "chunks_added": count}
+
+if __name__ == "__main__":
+    print("🚀 智能助手已启动，支持私有知识库 + 实时搜索")
+    uvicorn.run(app, host="0.0.0.0", port=8000)

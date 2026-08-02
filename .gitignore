@@ -1,0 +1,50 @@
+﻿# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+
+# Node
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+frontend/.vite-temp/
+
+# Database & Cache
+chroma_db/
+*.sqlite3
+*.sqlite3-journal
+*.sqlite3-wal
+*.sqlite3-shm
+
+# Secrets
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Models & Cache
+huggingface_cache/
+models/
+*.bin
+*.safetensors
+.cache/
+
+# Java / Spring Boot
+spring-boot-app/target/
+*.jar
+*.war
+
+# OS
+.DS_Store
+Thumbs.db
