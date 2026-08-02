@@ -14,37 +14,55 @@
 
 ## ⚡ 快速启动
 
-### 1. 启动 Ollama
-ash
-ollama serve
+### 方式一：一键启动（推荐 Windows 用户）
+双击项目根目录下的 **start.ps1**（PowerShell 脚本）或 **start.bat**，脚本会自动完成以下步骤：
+- 检查并启动 Ollama 服务
+- 启动后端 (FastAPI)
+- 启动前端 (React)
 
+> 首次使用请确保已安装依赖（见下方“准备工作”）。
 
-### 2. 安装 Python 依赖
-ash
-pip install -r requirements.txt
+### 方式二：手动启动
 
+**准备工作**  
+1. 安装 Python 依赖  
+   \\\ash
+   pip install -r requirements.txt
+   \\\
+2. 安装前端依赖  
+   \\\ash
+   cd frontend
+   npm install
+   cd ..
+   \\\
+3. 确保 Ollama 已安装并拉取所需模型（7B/14B/nomic-embed-text）
 
-### 3. 启动 AI 后端
-ash
-python agent_api.py
-
-服务运行在 http://localhost:8000，终端输出 🚀 智能助手已启动... 表示成功。
-
-### 4. 启动前端
-ash
-cd frontend
-npm install
-npm run dev
-
-前端运行在 http://localhost:5173，打开浏览器即可使用。
+**启动步骤**  
+1. 启动 Ollama  
+   \\\ash
+   ollama serve
+   \\\
+2. 启动 AI 后端  
+   \\\ash
+   python agent_api.py
+   \\\
+   服务运行在 http://localhost:8000，终端输出 🚀 智能助手已启动... 表示成功。
+3. 启动前端  
+   \\\ash
+   cd frontend
+   npm run dev
+   \\\
+   前端运行在 http://localhost:5173，打开浏览器即可使用。
 
 ## 📋 环境变量
 
-在运行后端前，可设置以下环境变量（非必须）：
-ash
-export TAVILY_API_KEY="你的Tavily Key"   # 用于网络搜索，不设置则跳过搜索
-export OLLAMA_KEEP_ALIVE="30m"           # 模型常驻时间，默认与代码保持一致
-export OLLAMA_MAX_LOADED_MODELS=1        # 单模型模式，避免显存溢出
+在项目根目录创建 .env 文件（可参考 .env.example），配置以下变量（非必须）：
+
+\\\ash
+TAVILY_API_KEY="你的Tavily Key"        # 用于网络搜索，不设置则跳过搜索
+OLLAMA_KEEP_ALIVE="30m"                # 模型常驻时间
+OLLAMA_MAX_LOADED_MODELS=1             # 单模型模式，避免显存溢出
+\\\
 
 如果不想使用搜索功能，可完全忽略 TAVILY_API_KEY，系统会自动降级。
 
@@ -67,6 +85,7 @@ export OLLAMA_MAX_LOADED_MODELS=1        # 单模型模式，避免显存溢出
 - **显存优化与常驻策略**：通过 keep_alive 和 OLLAMA_MAX_LOADED_MODELS 精细控制显存占用，8GB 显卡即可流畅运行 14B 模型。
 - **生产级可靠性**：502 自动重试、嵌入模型预热、工具调用防重复、最终答案兜底策略等，保障系统稳定。
 - **完整评估体系**：RAGAS 忠实度、召回率、精确度自动评估，支持前端查看报告。
+- **一键启动与工程化**：提供 PowerShell / Batch 启动脚本，并逐步引入 Ruff 格式化、pytest 测试、GitHub Actions CI（规划中）。
 
 ## 📊 系统接口概览
 
@@ -83,17 +102,30 @@ export OLLAMA_MAX_LOADED_MODELS=1        # 单模型模式，避免显存溢出
 
 ## 📂 项目结构
 
-ag-chat-platform/
-├── agent_api.py            # 后端主入口
+\\\
+rag-chat-platform/
+├── agent_api.py              # 后端主入口（FastAPI + RAG + Agent）
+├── start.ps1                 # Windows 一键启动脚本 (PowerShell)
+├── start.bat                 # Windows 一键启动脚本 (批处理)
+├── requirements.txt          # Python 依赖
+├── .env.example              # 环境变量模板
+├── pyproject.toml            # Ruff / pytest 配置（计划中）
+├── .github/
+│   └── workflows/
+│       └── ci.yml            # GitHub Actions CI（计划中）
+├── tests/
+│   ├── test_rag.py           # RAG 单元测试（计划中）
+│   └── test_agent.py         # Agent 单元测试（计划中）
 ├── frontend/
-│   ├── public/
+│   ├── index.html
+│   ├── package.json
+│   ├── vite.config.js
 │   └── src/
-│       ├── App.jsx         # 前端主组件
-│       └── ...
-├── chroma_db/              # 向量数据库
-├── requirements.txt
-└── README.md
-
+│       ├── App.jsx           # 前端主组件
+│       ├── App.css
+│       └── main.jsx
+└── chroma_db/                # 向量数据库（运行时生成，已加入 .gitignore）
+\\\
 
 ## 🤝 贡献与许可
 
