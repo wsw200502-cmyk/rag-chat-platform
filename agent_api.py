@@ -1,4 +1,4 @@
-﻿import asyncio
+import asyncio
 import inspect
 import json
 import logging
@@ -12,7 +12,7 @@ from typing import Any, List
 
 import requests
 
-# ========== ① 禁用系统代理，防止 localhost 被劫持导致 502 ==========
+# ========== 禁用系统代理，防止 localhost 被劫持导致 502 ==========
 os.environ["HTTP_PROXY"] = ""
 os.environ["HTTPS_PROXY"] = ""
 os.environ["ALL_PROXY"] = ""
@@ -45,7 +45,7 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from langchain_ollama import ChatOllama, OllamaEmbeddings
+from langchain_ollama import ChatOllama
 from pydantic import BaseModel
 
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
@@ -71,14 +71,16 @@ logger = logging.getLogger("agent_api")
 if not TAVILY_API_KEY:
     logger.warning("TAVILY_API_KEY 未设置，网络搜索功能将不可用。若需使用，请复制 .env.example 为 .env 并填入 Key。")
 
+
 # ==================== 模型名称规范化 ====================
 def normalize_model_name(name: str) -> str:
     """将旧版或别名模型名称映射到实际可用名称"""
     mapping = {
-        "qwen2.5:14b": "qwen3.5:9b",   # 旧名称映射到深度推理模型
-        "qwen3:14b": "qwen3.5:9b",     # 兼容前端旧 14B 标签
+        "qwen2.5:14b": "qwen3.5:9b",  # 旧名称映射到新主力模型
+        "qwen3:14b": "qwen3.5:9b",  # 兼容前端旧 14B 标签
     }
     return mapping.get(name, name)
+
 
 # ==================== 模型缓存（支持 keep_alive 参数） ====================
 llm_cache = {}
@@ -87,8 +89,8 @@ llm_cache = {}
 def get_llm(model_name: str, keep_alive: int = -1):
     """
     获取或创建 LLM 实例。
-    keep_alive=-1 表示常驻显存（适合 qwen3.5:9b 深度任务）。
-    keep_alive=0 表示用后即焚（适合 qwen3.5:4b 轻度对话）。
+    keep_alive=-1 表示常驻显存（适合 qwen3.5:9b 等核心模型）。
+    keep_alive=0 表示用后即焚（适合 qwen3.5:4b 轻量对话等）。
     """
     model_name = normalize_model_name(model_name)  # 规范化
     cache_key = (model_name, keep_alive)
@@ -97,7 +99,7 @@ def get_llm(model_name: str, keep_alive: int = -1):
         llm_cache[cache_key] = ChatOllama(
             model=model_name,
             temperature=0,
-            base_url="http://127.0.0.1:11434",  # ← 强制 IPv4
+            base_url="http://127.0.0.1:11434",  # 强制 IPv4
             num_predict=8192,
             keep_alive=keep_alive,
         )
@@ -108,7 +110,7 @@ def get_llm(model_name: str, keep_alive: int = -1):
 class OllamaEmbeddingDirect:
     """直接请求 Ollama /api/embed，禁用系统代理，避免 502。"""
 
-    def __init__(self, model: str = "nomic-embed-text", base_url: str = "http://127.0.0.1:11434"):  # ← 强制 IPv4
+    def __init__(self, model: str = "nomic-embed-text", base_url: str = "http://127.0.0.1:11434"):  # 强制 IPv4
         self.model = model
         self.base_url = base_url.rstrip("/")
 
@@ -132,10 +134,11 @@ class OllamaEmbeddingDirect:
     def embed_query(self, text: str) -> List[float]:
         return self._call(text)
 
+
 # ==================== 嵌入模型 ====================
 embedding = OllamaEmbeddingDirect(
     model="nomic-embed-text",
-    base_url="http://127.0.0.1:11434",  # ← 强制 IPv4
+    base_url="http://127.0.0.1:11434",  # 强制 IPv4
 )
 
 # ==================== 向量数据库（内嵌模式） ====================
@@ -172,11 +175,7 @@ def get_reranker():
     global reranker
     if reranker is None:
         # 优先使用本地缓存，避免网络下载失败
-        reranker = CrossEncoder(
-            "BAAI/bge-reranker-v2-m3",
-            local_files_only=True,
-            trust_remote_code=True
-        )
+        reranker = CrossEncoder("BAAI/bge-reranker-v2-m3", local_files_only=True, trust_remote_code=True)
     return reranker
 
 
@@ -340,7 +339,7 @@ def post_process(content: str, question: str) -> str:
 def generate_answer(
     question: str,
     history: list[dict[str, str]],
-    model_name: str = "qwen3.5:4b",  # ← 轻度对话默认 4B
+    model_name: str = "qwen3.5:4b",  # 默认轻量对话 4B
 ) -> str:
     """生成非流式回答。
 
@@ -357,7 +356,7 @@ def generate_answer(
     """
     model_name = normalize_model_name(model_name)  # 规范化
     messages = build_messages(question, history)
-    # 4B 轻量用完即焚，9B 深度常驻
+    # 4B 即焚，9B 常驻
     keep_alive = 0 if "4b" in model_name.lower() else -1
     llm = get_llm(model_name, keep_alive=keep_alive)
     response = llm.invoke(messages)
@@ -366,7 +365,7 @@ def generate_answer(
 
 # ==================== 多模型协作 ====================
 def generate_collaborative(question: str, history: list[dict[str, str]]) -> str:
-    # ----- 规划：深度推理 9B 常驻 -----
+    # ----- 规划：复用 9B 常驻 -----
     planner = get_llm("qwen3.5:9b", keep_alive=-1)
     planner_prompt = (
         "你是一个任务规划专家。将用户需求分解为清晰的步骤，并生成优化的提示词。"
@@ -377,7 +376,7 @@ def generate_collaborative(question: str, history: list[dict[str, str]]) -> str:
     plan_response = planner.invoke(plan_messages)
     optimized_query = plan_response.content.strip()
 
-    # ----- 执行：深度推理 9B 常驻（共享同一实例）-----
+    # ----- 执行：复用 9B 常驻 -----
     executor = get_llm("qwen3.5:9b", keep_alive=-1)
     messages = build_messages(optimized_query, history)
     messages[-1] = HumanMessage(
@@ -401,7 +400,7 @@ app.add_middleware(
 
 class ChatRequest(BaseModel):
     message: str
-    model: str = "qwen3.5:4b"  # ← 默认轻度对话 4B
+    model: str = "qwen3.5:4b"  # 默认轻量对话 4B
     history: list[dict[str, str]] = []
     models: list[str] | None = None
 
@@ -422,7 +421,7 @@ async def chat(req: ChatRequest):
 async def chat_stream(req: ChatRequest):
     async def event_stream():
         model = normalize_model_name(req.model)
-        # 4B 轻量用完即焚，9B 深度常驻
+        # 4B 即焚，9B 常驻
         keep_alive = 0 if "4b" in model.lower() else -1
         llm = get_llm(model, keep_alive=keep_alive)
         messages = build_messages(req.message, req.history)
@@ -461,7 +460,7 @@ async def chat_review(req: ChatRequest):
             else:
                 logger.error(f"嵌入预热最终失败: {e}")
 
-    # 三模型审查：解耦 + 执行 + 审查，全部使用 9B 深度推理
+    # 解耦 + 执行 + 审查，均复用同一个 9B 常驻实例
     models = req.models or ["qwen3.5:9b", "qwen3.5:9b", "qwen3.5:9b"]
     models = [normalize_model_name(m) for m in models]
     if len(models) < 3:
@@ -480,7 +479,7 @@ async def chat_review(req: ChatRequest):
                 else:
                     raise e
 
-    # 解耦：9B 常驻（共享同一实例）
+    # 1) 需求解耦
     decomposer = get_llm(models[0], keep_alive=-1)
     decomp_prompt = (
         f"你是需求分析专家。将用户需求分解为清晰步骤并生成优化提示词。只输出优化提示词。\n用户需求：{req.message}"
@@ -491,7 +490,7 @@ async def chat_review(req: ChatRequest):
     except Exception as e:
         return ChatResponse(response=f"需求解耦失败: {e!s}")
 
-    # 执行生成：9B 常驻（共享同一实例）
+    # 2) 执行生成
     executor_model = models[1] if len(models) > 1 else "qwen3.5:9b"
     executor = get_llm(executor_model, keep_alive=-1)
     messages = build_messages(optimized_query, req.history)
@@ -501,7 +500,7 @@ async def chat_review(req: ChatRequest):
     except Exception as e:
         return ChatResponse(response=f"生成回答失败: {e!s}")
 
-    # 审查：9B 常驻（共享同一实例）
+    # 3) 审查
     reviewer = get_llm(models[2], keep_alive=-1)
     review_prompt = (
         f"你是严格的事实核查员。审查回答是否忠实于知识库和用户问题。\n"
@@ -553,7 +552,7 @@ def generate_hypothetical_answer(question: str, model_name: str = "qwen3.5:9b") 
 
 问题：{question}
 假设答案："""
-    llm = get_llm(model_name, keep_alive=-1)  # 深度推理 9B 常驻
+    llm = get_llm(model_name, keep_alive=-1)  # 复用 9B 常驻
     resp = llm.invoke([HumanMessage(content=prompt)])
     return resp.content.strip()
 
@@ -585,7 +584,7 @@ def hyde_retrieve_and_answer(question: str, history: list[dict[str, str]], model
             messages.append(AIMessage(content=content))
     messages.append(HumanMessage(content=f"[本地知识库（基于假设答案检索）]\n{local_context}\n\n用户问题：{question}"))
 
-    llm = get_llm(model_name, keep_alive=-1)  # 深度推理 9B 常驻
+    llm = get_llm(model_name, keep_alive=-1)  # 复用 9B 常驻
     resp = llm.invoke(messages)
     return resp.content.strip()
 
@@ -602,20 +601,7 @@ async def chat_hyde(req: ChatRequest):
 
 
 # ==================== Self-RAG 实现 ====================
-
-
 def should_retrieve(question: str) -> bool:
-    """判断问题是否需要检索外部知识。
-
-    基于关键词规则判断：闲聊问候类问题不需要检索，
-    知识性、事实性问题需要检索。
-
-    Args:
-        question: 用户输入的问题字符串。
-
-    Returns:
-        True 表示需要检索，False 表示可直接回答。
-    """
     chat_keywords = [
         "你好",
         "嗨",
@@ -651,7 +637,7 @@ def self_rag_answer(
 ) -> str:
     decision_model = normalize_model_name(decision_model)
     generation_model = normalize_model_name(generation_model)
-    # 决策与生成均使用 9B 深度推理，共享同一常驻实例
+    # 决策与生成均复用同一个 9B 常驻实例
     decision_llm = get_llm(decision_model, keep_alive=-1)
     generation_llm = get_llm(generation_model, keep_alive=-1)
 
@@ -716,8 +702,6 @@ async def chat_selfrag(req: ChatRequest):
 
 
 # ==================== ReAct Agent 模块（增强版） ====================
-
-
 class ToolRegistry:
     def __init__(self):
         self._tools: dict[str, Callable] = {}
@@ -772,8 +756,6 @@ async def retrieve_knowledge(query: str) -> str:
 
 
 # ==================== 记忆系统 ====================
-
-
 @dataclass
 class WorkingMemory:
     current_goal: str = ""
@@ -818,8 +800,6 @@ class LongTermMemory:
 
 
 # ==================== 反思模块 ====================
-
-
 class ReflexionModule:
     def __init__(self, model_name: str = "qwen3.5:9b"):
         self.model_name = normalize_model_name(model_name)
@@ -834,14 +814,12 @@ class ReflexionModule:
             f"请用一句话总结：1) 为什么失败；2) 下一步应该调整什么策略。\n"
             f"反思："
         )
-        llm = get_llm(self.model_name, keep_alive=-1)  # 共享 9B 常驻实例
+        llm = get_llm(self.model_name, keep_alive=-1)  # 复用 9B 常驻
         resp = llm.invoke([HumanMessage(content=prompt)])
         return resp.content.strip()
 
 
 # ==================== 增强版 Agent ====================
-
-
 class RobustAgentExecutor:
     def __init__(
         self,
@@ -990,8 +968,8 @@ class RobustAgentExecutor:
             f"可用工具：\n{tool_desc}\n\n"
             f"{memory_hint}\n\n"
             f"规则：\n"
-            f'1. 必须使用 JSON 格式调用工具：{{"tool": "工具名", "input": "输入"}}\\n'
-            f'2. 获得足够信息后，输出：{{"final": "最终答案"}} 或直接以 \'Final Answer:\' 开头输出文本。\\n'
+            f'1. 必须使用 JSON 格式调用工具：{{"tool": "工具名", "input": "输入"}}\n'
+            f'2. 获得足够信息后，输出：{{"final": "最终答案"}} 或直接以 \'Final Answer:\' 开头输出文本。\n'
             f"3. 不要重复调用已成功的工具，直接基于结果作答。\n"
             f"4. 如果连续两次无法提取有效信息，请立即输出 final 答案。\n\n"
             f"历史对话：\n{history_text}"
@@ -1002,7 +980,7 @@ class RobustAgentExecutor:
             HumanMessage(content=f"开始执行子任务：{task['description']}"),
         ]
 
-        # 核心执行模型：9B 深度推理常驻
+        # 核心执行模型：9B 复用常驻
         llm = get_llm(self.model_name, keep_alive=-1)
         step = 0
         start_time = time.time()
@@ -1114,7 +1092,7 @@ async def agent_endpoint(req: ChatRequest):
 if __name__ == "__main__":
     print("正在预热 Reranker 模型...")
     _ = get_reranker()
-    
+
     print("正在预热嵌入模型 (nomic-embed-text)...")
     for i in range(5):
         try:
@@ -1127,7 +1105,7 @@ if __name__ == "__main__":
     else:
         print("嵌入模型预热最终失败，将在第一次请求时自动重试")
 
-    # 预热 qwen3.5:9b（深度推理常驻）
+    # 预热 qwen3.5:9b（核心模型，常驻）
     print("正在预热 LLM (qwen3.5:9b) 常驻...")
     try:
         warmup_llm = get_llm("qwen3.5:9b", keep_alive=-1)
@@ -1138,7 +1116,7 @@ if __name__ == "__main__":
 
     print("🚀 智能助手已启动，支持混合检索+Reranker+多模型协作+链式审查+ReAct Agent+HyDE+Self-RAG")
     print("   - 所有 Ollama 请求使用 127.0.0.1 (IPv4)，避免 localhost 解析为 ::1 导致 404")
-    print("   - 轻度对话 (/chat)：qwen3.5:4b，keep_alive=0（用完即焚，不占显存）")
+    print("   - 轻量对话 (/chat)：qwen3.5:4b，keep_alive=0（用后即焚，不占显存）")
     print("   - 深度推理（审查/Agent/HyDE/Self-RAG）：qwen3.5:9b，keep_alive=-1（常驻显存）")
     print("   - 模型名称自动规范化：qwen3:14b / qwen2.5:14b -> qwen3.5:9b")
     uvicorn.run(app, host="0.0.0.0", port=8000)
