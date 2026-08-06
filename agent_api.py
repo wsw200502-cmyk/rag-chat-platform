@@ -1,66 +1,69 @@
-import asyncio
+﻿import asyncio
+import base64
 import inspect
 import json
 import logging
 import os
 import re
+import shutil
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 from typing import Any, List
 
 import requests
-
-# ========== 禁用系统代理，防止 localhost 被劫持导致 502 ==========
-os.environ["HTTP_PROXY"] = ""
-os.environ["HTTPS_PROXY"] = ""
-os.environ["ALL_PROXY"] = ""
-os.environ["NO_PROXY"] = "localhost,127.0.0.1,::1"
-
-from dotenv import load_dotenv
-
-# 显式指定 .env 路径（确保和 agent_api.py 同目录）
-env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
-load_dotenv(env_path, override=True)
-
-# 如果 load_dotenv 因 BOM 头解析失败，手动解析兜底
-if not os.getenv("TAVILY_API_KEY"):
-    try:
-        with open(env_path, "r", encoding="utf-8-sig") as f:  # utf-8-sig 自动去掉 BOM 头
-            for line in f:
-                line = line.strip()
-                if line and not line.startswith("#") and "=" in line:
-                    key, value = line.split("=", 1)
-                    os.environ[key.strip()] = value.strip()
-        print("[DEBUG] 已手动解析 .env（load_dotenv 未生效）")
-    except Exception as e:
-        print(f"[DEBUG] 手动解析 .env 失败: {e}")
-
-# 调试用：确认 Key 是否加载成功
-print(f"[DEBUG] .env 路径: {env_path}")
-print(f"[DEBUG] TAVILY_API_KEY 是否加载: {os.getenv('TAVILY_API_KEY') is not None}")
-
 import uvicorn
-from fastapi import FastAPI
+from config import get_settings
+from dotenv import load_dotenv
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from langchain_ollama import ChatOllama
-from pydantic import BaseModel
-
-TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
-if TAVILY_API_KEY:
-    from langchain_tavily import TavilySearch
-
 from langchain_chroma import Chroma
 from langchain_community.document_loaders import PyPDFLoader, TextLoader
 from langchain_core.documents import Document
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+from pydantic import BaseModel
 from rank_bm25 import BM25Okapi
 from sentence_transformers import CrossEncoder
 
-# ==================== 结构化日志配置 ====================
+settings = get_settings()
+
+# 路径自动创建
+Path(settings.sessions_dir).mkdir(parents=True, exist_ok=True)
+Path(settings.chroma_persist_dir).mkdir(parents=True, exist_ok=True)
+Path("./uploaded_docs").mkdir(parents=True, exist_ok=True)
+
+# ========== ① 禁用系统代理 ==========
+os.environ["HTTP_PROXY"] = ""
+os.environ["HTTPS_PROXY"] = ""
+os.environ["ALL_PROXY"] = ""
+os.environ["NO_PROXY"] = "localhost,127.0.0.1,::1"
+
+# 兼容 .env 手动解析
+env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+load_dotenv(env_path, override=True)
+if not os.getenv("TAVILY_API_KEY"):
+    try:
+        with open(env_path, "r", encoding="utf-8-sig") as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    key, value = line.split("=", 1)
+                    os.environ[key.strip()] = value.strip()
+    except Exception:
+        pass
+
+print(f"[DEBUG] .env 路径: {env_path}")
+print(f"[DEBUG] TAVILY_API_KEY 是否加载: {os.getenv('TAVILY_API_KEY') is not None}")
+
+TAVILY_API_KEY = settings.tavily_api_key or os.getenv("TAVILY_API_KEY")
+if TAVILY_API_KEY:
+    from langchain_tavily import TavilySearch
+
+# ==================== 结构化日志 ====================
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -69,50 +72,63 @@ logging.basicConfig(
 logger = logging.getLogger("agent_api")
 
 if not TAVILY_API_KEY:
-    logger.warning("TAVILY_API_KEY 未设置，网络搜索功能将不可用。若需使用，请复制 .env.example 为 .env 并填入 Key。")
+    logger.warning("TAVILY_API_KEY 未设置，网络搜索功能将不可用。")
 
 
 # ==================== 模型名称规范化 ====================
 def normalize_model_name(name: str) -> str:
-    """将旧版或别名模型名称映射到实际可用名称"""
     mapping = {
-        "qwen2.5:14b": "qwen3.5:9b",  # 旧名称映射到新主力模型
-        "qwen3:14b": "qwen3.5:9b",  # 兼容前端旧 14B 标签
+        "qwen2.5:14b": "qwen3.5:9b",
+        "qwen3:14b": "qwen3.5:9b",
     }
     return mapping.get(name, name)
 
-
-# ==================== 模型缓存（支持 keep_alive 参数） ====================
+# ==================== 模型缓存 & 显存管理 ====================
 llm_cache = {}
-
+_active_model_key = None
 
 def get_llm(model_name: str, keep_alive: int = -1):
-    """
-    获取或创建 LLM 实例。
-    keep_alive=-1 表示常驻显存（适合 qwen3.5:9b 等核心模型）。
-    keep_alive=0 表示用后即焚（适合 qwen3.5:4b 轻量对话等）。
-    """
-    model_name = normalize_model_name(model_name)  # 规范化
+    """获取LLM，支持显存管理：8G显存一次只常驻一个模型"""
+    global _active_model_key
+    model_name = normalize_model_name(model_name)
     cache_key = (model_name, keep_alive)
+    
+    if keep_alive == -1 and _active_model_key != cache_key and _active_model_key is not None:
+        logger.info(f"显存管理: 释放之前常驻模型 {_active_model_key[0]}")
+        try:
+            requests.post(
+                f"{settings.ollama_base_url}/api/generate",
+                json={"model": _active_model_key[0], "keep_alive": 0},
+                proxies={"http": None, "https": None},
+                timeout=10,
+            )
+        except Exception as e:
+            logger.debug(f"释放模型显存时出错: {e}")
+        if _active_model_key in llm_cache:
+            del llm_cache[_active_model_key]
+    
     if cache_key not in llm_cache:
         logger.info(f"初始化模型: {model_name} (keep_alive={keep_alive})")
-        llm_cache[cache_key] = ChatOllama(
+        llm_cache[cache_key] = __import__(
+            "langchain_ollama", fromlist=["ChatOllama"]
+        ).ChatOllama(
             model=model_name,
             temperature=0,
-            base_url="http://127.0.0.1:11434",  # 强制 IPv4
-            num_predict=8192,
+            base_url=settings.ollama_base_url,
+            num_predict=settings.ollama_num_predict,
+            num_ctx=settings.ollama_context_length,
             keep_alive=keep_alive,
         )
+    
+    if keep_alive == -1:
+        _active_model_key = cache_key
     return llm_cache[cache_key]
 
-
-# ==================== 自定义 Embedding（绕过 langchain-ollama 502 问题） ====================
+# ==================== 自定义 Embedding ====================
 class OllamaEmbeddingDirect:
-    """直接请求 Ollama /api/embed，禁用系统代理，避免 502。"""
-
-    def __init__(self, model: str = "nomic-embed-text", base_url: str = "http://127.0.0.1:11434"):  # 强制 IPv4
-        self.model = model
-        self.base_url = base_url.rstrip("/")
+    def __init__(self, model: str = None, base_url: str = None):
+        self.model = model or settings.ollama_embed_model
+        self.base_url = (base_url or settings.ollama_base_url).rstrip("/")
 
     def _call(self, text: str) -> List[float]:
         resp = requests.post(
@@ -134,29 +150,23 @@ class OllamaEmbeddingDirect:
     def embed_query(self, text: str) -> List[float]:
         return self._call(text)
 
+embedding = OllamaEmbeddingDirect()
 
-# ==================== 嵌入模型 ====================
-embedding = OllamaEmbeddingDirect(
-    model="nomic-embed-text",
-    base_url="http://127.0.0.1:11434",  # 强制 IPv4
-)
-
-# ==================== 向量数据库（内嵌模式） ====================
+# ==================== 向量数据库 ====================
 vectorstore = Chroma(
-    persist_directory="./chroma_db",
+    persist_directory=settings.chroma_persist_dir,
     embedding_function=embedding,
 )
 
-# ==================== 网络搜索（容错降级） ====================
+# ==================== 网络搜索 ====================
 if TAVILY_API_KEY:
     search = TavilySearch(api_key=TAVILY_API_KEY, max_results=3)
 else:
     search = None
 
-# ==================== 混合检索全局变量 ====================
+# ==================== 混合检索 ====================
 global_documents_text: list[str] = []
 bm25_index = None
-
 
 def rebuild_bm25():
     global bm25_index
@@ -166,18 +176,18 @@ def rebuild_bm25():
     else:
         bm25_index = None
 
-
 # ==================== Reranker ====================
 reranker = None
-
 
 def get_reranker():
     global reranker
     if reranker is None:
-        # 优先使用本地缓存，避免网络下载失败
-        reranker = CrossEncoder("BAAI/bge-reranker-v2-m3", local_files_only=True, trust_remote_code=True)
+        reranker = CrossEncoder(
+            "BAAI/bge-reranker-v2-m3",
+            local_files_only=True,
+            trust_remote_code=True,
+        )
     return reranker
-
 
 # ==================== 文档导入 ====================
 def add_documents_to_store(file_paths: list[str]) -> int:
@@ -196,7 +206,6 @@ def add_documents_to_store(file_paths: list[str]) -> int:
     rebuild_bm25()
     return len(chunks)
 
-
 # ==================== 混合检索 + Rerank ====================
 def retrieve_with_hybrid_and_rerank(
     query: str,
@@ -205,21 +214,6 @@ def retrieve_with_hybrid_and_rerank(
     final_k: int = 3,
     max_retries: int = 5,
 ) -> list[Document]:
-    """执行混合检索 + Cross-Encoder Reranker 重排序。
-
-    先分别进行向量检索和 BM25 检索，合并去重后
-    使用 Cross-Encoder 对结果重新打分排序。
-
-    Args:
-        query: 用户查询字符串。
-        k_vector: 向量检索返回的文档数量。
-        k_bm25: BM25 检索返回的文档数量。
-        final_k: Reranker 最终返回的文档数量。
-        max_retries: 向量检索失败时的最大重试次数。
-
-    Returns:
-        按相关性排序后的文档列表。
-    """
     vec_docs = []
     for attempt in range(max_retries):
         try:
@@ -254,25 +248,12 @@ def retrieve_with_hybrid_and_rerank(
     sorted_indices = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:final_k]
     return [list(all_docs)[i] for i in sorted_indices]
 
-
 # ==================== 构建消息列表 ====================
 def build_messages(
     question: str,
     history: list[dict[str, str]],
     extra_context: str = "",
 ) -> list:
-    """构建发送给 LLM 的消息列表。
-
-    整合本地知识库、网络搜索结果、历史对话和系统提示。
-
-    Args:
-        question: 当前用户问题。
-        history: 历史对话记录，每项为 {"role": "user"|"assistant", "content": "..."}。
-        extra_context: 额外的上下文信息（如 HyDE 检索结果）。
-
-    Returns:
-        符合 LangChain 格式的消息对象列表。
-    """
     local_docs = retrieve_with_hybrid_and_rerank(question)
     local_context = "\n".join([doc.page_content for doc in local_docs]) if local_docs else "无相关本地知识"
     web_context = "网络搜索不可用（未配置 API Key）"
@@ -309,7 +290,6 @@ def build_messages(
     messages.append(HumanMessage(content=f"{context}\n\n用户问题：{question}"))
     return messages
 
-
 # ==================== 后处理 ====================
 def post_process(content: str, question: str) -> str:
     content = re.sub(r"^ython\b", r"```python", content, flags=re.MULTILINE)
@@ -334,39 +314,22 @@ def post_process(content: str, question: str) -> str:
             return re.sub(r"```.*?```", "", content, flags=re.DOTALL).strip()
     return content
 
-
 # ==================== 非流式接口 ====================
 def generate_answer(
     question: str,
     history: list[dict[str, str]],
-    model_name: str = "qwen3.5:4b",  # 默认轻量对话 4B
+    model_name: str = None,
 ) -> str:
-    """生成非流式回答。
-
-    调用指定模型，基于检索到的上下文和历史对话生成回答，
-    并对输出进行后处理（如自动补全代码块）。
-
-    Args:
-        question: 用户问题。
-        history: 历史对话记录。
-        model_name: 使用的 Ollama 模型名称。
-
-    Returns:
-        经过后处理的回答字符串。
-    """
-    model_name = normalize_model_name(model_name)  # 规范化
+    model_name = normalize_model_name(model_name or settings.ollama_default_model)
     messages = build_messages(question, history)
-    # 4B 即焚，9B 常驻
     keep_alive = 0 if "4b" in model_name.lower() else -1
     llm = get_llm(model_name, keep_alive=keep_alive)
     response = llm.invoke(messages)
     return post_process(response.content, question)
 
-
 # ==================== 多模型协作 ====================
 def generate_collaborative(question: str, history: list[dict[str, str]]) -> str:
-    # ----- 规划：复用 9B 常驻 -----
-    planner = get_llm("qwen3.5:9b", keep_alive=-1)
+    planner = get_llm(settings.ollama_deep_model, keep_alive=-1)
     planner_prompt = (
         "你是一个任务规划专家。将用户需求分解为清晰的步骤，并生成优化的提示词。"
         "只输出优化后的提示词，不要解释。\n"
@@ -376,8 +339,7 @@ def generate_collaborative(question: str, history: list[dict[str, str]]) -> str:
     plan_response = planner.invoke(plan_messages)
     optimized_query = plan_response.content.strip()
 
-    # ----- 执行：复用 9B 常驻 -----
-    executor = get_llm("qwen3.5:9b", keep_alive=-1)
+    executor = get_llm(settings.ollama_deep_model, keep_alive=-1)
     messages = build_messages(optimized_query, history)
     messages[-1] = HumanMessage(
         content=(f"根据资料回答用户问题。\n用户问题：{question}\n优化提示词：{optimized_query}")
@@ -385,9 +347,8 @@ def generate_collaborative(question: str, history: list[dict[str, str]]) -> str:
     final_response = executor.invoke(messages)
     return final_response.content
 
-
-# ==================== FastAPI 应用 ====================
-app = FastAPI(title="AI Assistant (RAG + Agent + HyDE + Self-RAG)")
+# ==================== FastAPI ====================
+app = FastAPI(title="AI Assistant (RAG + Agent + HyDE + Self-RAG + Vision)")
 
 app.add_middleware(
     CORSMiddleware,
@@ -397,31 +358,26 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
 class ChatRequest(BaseModel):
     message: str
-    model: str = "qwen3.5:4b"  # 默认轻量对话 4B
+    model: str = None
     history: list[dict[str, str]] = []
     models: list[str] | None = None
-
 
 class ChatResponse(BaseModel):
     response: str
 
-
 # ==================== 原有路由 ====================
 @app.post("/chat", response_model=ChatResponse)
 async def chat(req: ChatRequest):
-    model = normalize_model_name(req.model)
+    model = normalize_model_name(req.model or settings.ollama_default_model)
     answer = generate_answer(req.message, req.history, model)
     return ChatResponse(response=answer)
-
 
 @app.post("/chat/stream")
 async def chat_stream(req: ChatRequest):
     async def event_stream():
-        model = normalize_model_name(req.model)
-        # 4B 即焚，9B 常驻
+        model = normalize_model_name(req.model or settings.ollama_default_model)
         keep_alive = 0 if "4b" in model.lower() else -1
         llm = get_llm(model, keep_alive=keep_alive)
         messages = build_messages(req.message, req.history)
@@ -439,14 +395,163 @@ async def chat_stream(req: ChatRequest):
 
     return StreamingResponse(event_stream(), media_type="text/event-stream; charset=utf-8")
 
-
 @app.post("/chat/multi")
 async def chat_multi(req: ChatRequest):
     answer = generate_collaborative(req.message, req.history)
     return ChatResponse(response=answer)
 
+# ==================== 三角形多Agent协作架构（内切圆共享核心） ====================
+class SharedCore:
+    def __init__(self):
+        self.memory: dict[str, Any] = {}
+        self.retrieval_log: list[dict] = []
+        self.tool_log: list[dict] = []
 
-# ==================== 三模型链式审查 ====================
+    async def retrieve(self, query: str, k_vector: int = 10, k_bm25: int = 10, final_k: int = 5) -> list[Document]:
+        docs = retrieve_with_hybrid_and_rerank(query, k_vector, k_bm25, final_k)
+        self.retrieval_log.append({"query": query, "count": len(docs)})
+        return docs
+
+    def web_search(self, query: str) -> str:
+        if search is None:
+            return "网络搜索不可用（未配置 API Key）"
+        try:
+            result = str(search.invoke(query))
+            return result
+        except Exception as e:
+            return f"网络搜索失败: {e}"
+
+    def use_tool(self, tool_name: str, tool_input: str) -> str:
+        tool = tool_registry.get_tool(tool_name) if 'tool_registry' in globals() else None
+        if not tool:
+            return f"错误：未找到工具 '{tool_name}'"
+        try:
+            if inspect.iscoroutinefunction(tool):
+                try:
+                    loop = asyncio.get_running_loop()
+                    future = asyncio.run_coroutine_threadsafe(tool(tool_input), loop)
+                    result = future.result(timeout=30)
+                except RuntimeError:
+                    result = asyncio.run(tool(tool_input))
+            else:
+                result = tool(tool_input)
+            self.tool_log.append({"tool": tool_name, "input": tool_input, "output": str(result)[:200]})
+            return result
+        except Exception as e:
+            return f"工具执行错误: {e}"
+
+    def store(self, key: str, value: Any):
+        self.memory[key] = value
+
+    def get(self, key: str, default=None):
+        return self.memory.get(key, default)
+
+    def get_tool_descriptions(self) -> str:
+        return tool_registry.get_all_descriptions() if 'tool_registry' in globals() else ""
+
+class TriangleAgent:
+    def __init__(self, name: str, model_name: str, role_desc: str, core: SharedCore):
+        self.name = name
+        self.model_name = normalize_model_name(model_name)
+        self.role_desc = role_desc
+        self.core = core
+
+    async def think(self, instruction: str, history: list[dict] = None, max_retries: int = 3) -> str:
+        llm = get_llm(self.model_name, keep_alive=-1)
+        messages = [
+            SystemMessage(content=(
+                f"你是 {self.name}。\n"
+                f"角色定位：{self.role_desc}\n"
+                f"当前日期：{datetime.now().strftime('%Y年%m月%d日')}"
+            ))
+        ]
+        if history:
+            for h in history[-6:]:
+                role = h.get("role")
+                content = h.get("content", "")
+                if role == "user":
+                    messages.append(HumanMessage(content=content))
+                elif role == "assistant":
+                    messages.append(AIMessage(content=content))
+        messages.append(HumanMessage(content=instruction))
+
+        for attempt in range(max_retries):
+            try:
+                resp = await asyncio.to_thread(llm.invoke, messages)
+                return resp.content.strip()
+            except Exception as e:
+                if "502" in str(e) and attempt < max_retries - 1:
+                    wait_time = 2**attempt + 10
+                    logger.warning(f"[{self.name}] LLM 502，等待 {wait_time}s 重试 {attempt+1}/{max_retries}")
+                    time.sleep(wait_time)
+                else:
+                    raise e
+
+    async def analyze(self, question: str, history: list[dict] = None) -> str:
+        docs = await self.core.retrieve(question)
+        self.core.store("phase1_docs", docs)
+        local_ctx = "\n".join([d.page_content for d in docs]) if docs else "无相关本地知识"
+        web_ctx = self.core.web_search(question)
+
+        prompt = (
+            f"请分析以下问题，指出回答该问题需要确认的关键事实。\n"
+            f"问题：{question}\n"
+            f"参考资料：{local_ctx}\n"
+            f"网络搜索摘要：{web_ctx}\n\n"
+            f"只需列出关键点，不要展开。"
+        )
+        return await self.think(prompt, history)
+
+    async def generate(self, question: str, analysis: str, history: list[dict] = None) -> str:
+        docs = self.core.get("phase1_docs") or await self.core.retrieve(question)
+        local_ctx = "\n".join([d.page_content for d in docs]) if docs else "无相关本地知识"
+        web_ctx = self.core.web_search(question)
+
+        prompt = (
+            f"基于分析结果和资料，直接回答问题。\n"
+            f"问题：{question}\n"
+            f"分析：{analysis}\n"
+            f"本地资料：{local_ctx}\n"
+            f"网络搜索：{web_ctx}\n\n"
+            f"请给出准确、简洁的答案。"
+        )
+        return await self.think(prompt, history)
+
+    async def verify(self, question: str, analysis: str, draft: str, history: list[dict] = None) -> str:
+        verify_docs = await self.core.retrieve(f"验证：{question}", final_k=5)
+        verify_ctx = "\n".join([d.page_content for d in verify_docs]) if verify_docs else "无相关验证资料"
+
+        prompt = (
+            f"请审查以下答案是否准确、完整。\n"
+            f"问题：{question}\n"
+            f"答案：{draft}\n"
+            f"验证资料：{verify_ctx}\n\n"
+            f"如果准确无误，回复“VERIFIED”；否则回复“REVISION: 具体问题”。"
+        )
+        return await self.think(prompt, history)
+
+# ==================== ToolRegistry ====================
+class ToolRegistry:
+    def __init__(self):
+        self._tools: dict[str, Callable] = {}
+        self._descriptions: dict[str, str] = {}
+
+    def register(self, name: str, description: str):
+        def decorator(func: Callable):
+            self._tools[name] = func
+            self._descriptions[name] = description
+            return func
+        return decorator
+
+    def get_tool(self, name: str) -> Callable | None:
+        return self._tools.get(name)
+
+    def get_all_descriptions(self) -> str:
+        return "\n".join([f"- {name}: {desc}" for name, desc in self._descriptions.items()])
+
+tool_registry = ToolRegistry()
+
+# ==================== /chat/review 端点（含容错） ====================
 @app.post("/chat/review")
 async def chat_review(req: ChatRequest):
     for i in range(5):
@@ -455,110 +560,116 @@ async def chat_review(req: ChatRequest):
             break
         except Exception as e:
             if i < 4:
-                logger.warning(f"嵌入预热失败，重试 {i + 1}/5: {e}")
+                logger.warning(f"嵌入预热失败，重试 {i+1}/5: {e}")
                 time.sleep(2)
             else:
                 logger.error(f"嵌入预热最终失败: {e}")
 
-    # 解耦 + 执行 + 审查，均复用同一个 9B 常驻实例
-    models = req.models or ["qwen3.5:9b", "qwen3.5:9b", "qwen3.5:9b"]
+    models = req.models or [settings.ollama_deep_model] * 3
     models = [normalize_model_name(m) for m in models]
     if len(models) < 3:
-        return ChatResponse(response="审查模式需要至少三个模型")
+        return ChatResponse(response="三角形协作审查模式需要至少三个模型")
 
-    def robust_llm_call(llm, messages, max_retries=5):
-        for attempt in range(max_retries):
-            try:
-                return llm.invoke(messages)
-            except Exception as e:
-                if "502" in str(e) and attempt < max_retries - 1:
-                    wait_time = 2**attempt + 15
-                    logger.warning(f"LLM调用失败(502)，等待 {wait_time}s 重试 {attempt + 1}/{max_retries - 1}")
-                    time.sleep(wait_time)
-                    continue
-                else:
-                    raise e
+    core = SharedCore()
+    agent_a = TriangleAgent("Agent-A·分析", models[0], "需求分析专家", core)
+    agent_b = TriangleAgent("Agent-B·生成", models[1], "答案生成专家", core)
+    agent_c = TriangleAgent("Agent-C·审查", models[2], "事实核查专家", core)
 
-    # 1) 需求解耦
-    decomposer = get_llm(models[0], keep_alive=-1)
-    decomp_prompt = (
-        f"你是需求分析专家。将用户需求分解为清晰步骤并生成优化提示词。只输出优化提示词。\n用户需求：{req.message}"
-    )
+    # ----- 阶段1：分析 -----
     try:
-        decomp_resp = await asyncio.to_thread(robust_llm_call, decomposer, [HumanMessage(content=decomp_prompt)])
-        optimized_query = decomp_resp.content.strip()
+        analysis = await agent_a.analyze(req.message, req.history)
+        core.store("analysis", analysis)
+        logger.info("[Phase 1] 分析完成")
     except Exception as e:
-        return ChatResponse(response=f"需求解耦失败: {e!s}")
+        logger.error(f"Agent-A 分析失败: {e}")
+        analysis = None
 
-    # 2) 执行生成
-    executor_model = models[1] if len(models) > 1 else "qwen3.5:9b"
-    executor = get_llm(executor_model, keep_alive=-1)
-    messages = build_messages(optimized_query, req.history)
+    # ----- 阶段2：生成（含容错接管） -----
+    draft = None
+    if analysis:
+        try:
+            draft = await agent_b.generate(req.message, analysis, req.history)
+            core.store("draft", draft)
+            logger.info("[Phase 2] 生成完成")
+        except Exception as e:
+            logger.error(f"Agent-B 生成失败: {e}")
+            draft = None
+
+    if not draft:
+        logger.warning("Agent-B 故障，启用 Agent-C 接管生成")
+        try:
+            takeover_prompt = (
+                f"Agent-A 和 Agent-B 均未产出有效草案。请直接根据以下信息回答用户问题。\n"
+                f"问题：{req.message}\n"
+                f"分析：{analysis or '无'}\n"
+                f"请给出简洁准确的答案。"
+            )
+            draft = await agent_c.think(takeover_prompt, req.history)
+            core.store("draft", draft)
+            logger.info("Agent-C 接管生成完成")
+        except Exception as e:
+            logger.error(f"Agent-C 接管也失败: {e}")
+            return ChatResponse(response=f"三角形协作完全失败：{e!s}")
+
+    # ----- 阶段3：审查 -----
     try:
-        exec_resp = await asyncio.to_thread(robust_llm_call, executor, messages)
-        draft_answer = exec_resp.content
+        review = await agent_c.verify(req.message, analysis or "", draft, req.history)
+        core.store("review", review)
+        logger.info("[Phase 3] 审查完成")
     except Exception as e:
-        return ChatResponse(response=f"生成回答失败: {e!s}")
+        logger.error(f"Agent-C 审查失败: {e}")
+        review = "审查不可用"
 
-    # 3) 审查
-    reviewer = get_llm(models[2], keep_alive=-1)
-    review_prompt = (
-        f"你是严格的事实核查员。审查回答是否忠实于知识库和用户问题。\n"
-        f"如果准确输出'PASS'，否则输出'FAIL: 具体问题'。\n\n"
-        f"原始问题：{req.message}\n"
-        f"优化提示词：{optimized_query}\n"
-        f"回答草案：{draft_answer}\n\n"
-        f"审查结果（PASS 或 FAIL: ...）："
-    )
-    try:
-        review_resp = await asyncio.to_thread(robust_llm_call, reviewer, [HumanMessage(content=review_prompt)])
-        review_result = review_resp.content.strip()
-    except Exception as e:
-        review_result = f"审查出错: {e!s}"
+    # ----- 综合仲裁 -----
+    needs_revision = any(kw in review.upper() for kw in ["REVISION", "FAIL", "修改", "错误", "不通过"])
+    if needs_revision:
+        docs = core.get("phase1_docs") or await core.retrieve(req.message)
+        local_ctx = "\n".join([d.page_content for d in docs]) if docs else "无相关本地知识"
+        revision_prompt = (
+            f"你的答案草案未通过事实核查。\n\n"
+            f"审查意见：{review}\n\n"
+            f"原始问题：{req.message}\n"
+            f"Agent-A 分析：{analysis or '无'}\n\n"
+            f"共享检索资料：\n{local_ctx}\n\n"
+            f"请根据审查意见和共享资料修订答案，确保事实准确："
+        )
+        try:
+            final_answer = await agent_b.think(revision_prompt, req.history) if analysis else await agent_c.think(revision_prompt, req.history)
+        except:
+            final_answer = draft  # 修订失败则返回原草案
+        status_tag = (
+            f"\n\n[三角形协作日志]\n"
+            f"- Agent-A 分析: {'✓' if analysis else '✗ 失败'}\n"
+            f"- Agent-B 生成: {'✓' if analysis and draft else '✗ 失败 (已接管)'}\n"
+            f"- Agent-C 审查: ✗ 未通过\n"
+            f"- 修订: ✓ 已执行\n"
+            f"- 审查详情: {review[:200]}"
+        )
+    else:
+        final_answer = draft
+        status_tag = (
+            f"\n\n[三角形协作日志]\n"
+            f"- Agent-A 分析: {'✓' if analysis else '✗ 失败'}\n"
+            f"- Agent-B 生成: {'✓' if analysis and draft else '✗ 失败 (已接管)'}\n"
+            f"- Agent-C 审查: ✓ 通过\n"
+            f"- 审查详情: {review[:200]}"
+        )
 
-    final_answer = f"{draft_answer}\n\n[审查意见: {review_result}]"
-    return ChatResponse(response=final_answer)
+    return ChatResponse(response=final_answer + status_tag)
 
-
-# ==================== 文档与评估 ====================
-@app.post("/add_docs")
-async def add_docs(files: list[str]):
-    count = add_documents_to_store(files)
-    return {"status": "success", "chunks_added": count}
-
-
-@app.post("/retrieve")
-async def retrieve_contexts(query: str):
-    docs = retrieve_with_hybrid_and_rerank(query)
-    return {"contexts": [doc.page_content for doc in docs]}
-
-
-EVAL_FILE_PATH = "D:/ragas_eval/eval_results.json"
-
-
-@app.get("/eval/report")
-async def get_eval_report():
-    if not os.path.exists(EVAL_FILE_PATH):
-        return {"message": "暂无评估报告"}
-    with open(EVAL_FILE_PATH, "r", encoding="utf-8") as f:
-        data = json.load(f)
-    return data
-
-
-# ==================== HyDE 检索增强生成 ====================
-def generate_hypothetical_answer(question: str, model_name: str = "qwen3.5:9b") -> str:
-    model_name = normalize_model_name(model_name)
+# ==================== HyDE ====================
+def generate_hypothetical_answer(question: str, model_name: str = None) -> str:
+    model_name = normalize_model_name(model_name or settings.ollama_deep_model)
     prompt = f"""请根据你的知识，为以下问题生成一段假设性的回答（哪怕不知道确切答案，也请给出合理的推测性描述）。只需输出回答内容，不需要解释。
 
 问题：{question}
 假设答案："""
-    llm = get_llm(model_name, keep_alive=-1)  # 复用 9B 常驻
+    llm = get_llm(model_name, keep_alive=-1)
     resp = llm.invoke([HumanMessage(content=prompt)])
     return resp.content.strip()
 
-
-def hyde_retrieve_and_answer(question: str, history: list[dict[str, str]], model_name: str = "qwen3.5:9b") -> str:
-    model_name = normalize_model_name(model_name)
+def hyde_retrieve_and_answer(question: str, history: list[dict[str, str]], model_name: str = None) -> str:
+    model_name = normalize_model_name(model_name or settings.ollama_deep_model)
     hypothetical = generate_hypothetical_answer(question)
     local_docs = retrieve_with_hybrid_and_rerank(hypothetical)
     local_context = "\n".join([doc.page_content for doc in local_docs]) if local_docs else "无相关本地知识"
@@ -588,19 +699,17 @@ def hyde_retrieve_and_answer(question: str, history: list[dict[str, str]], model
     resp = llm.invoke(messages)
     return resp.content.strip()
 
-
 @app.post("/chat/hyde")
 async def chat_hyde(req: ChatRequest):
     try:
-        model = normalize_model_name(req.model)
+        model = normalize_model_name(req.model or settings.ollama_deep_model)
         answer = await asyncio.to_thread(hyde_retrieve_and_answer, req.message, req.history, model)
         return ChatResponse(response=answer)
     except Exception as e:
         logger.error(f"HyDE 请求失败: {e!s}")
         return ChatResponse(response=f"HyDE 处理失败: {e!s}")
 
-
-# ==================== Self-RAG 实现 ====================
+# ==================== Self-RAG ====================
 def should_retrieve(question: str) -> bool:
     chat_keywords = [
         "你好",
@@ -617,7 +726,6 @@ def should_retrieve(question: str) -> bool:
     lowered = question.lower().strip()
     return not any(kw in lowered for kw in chat_keywords)
 
-
 SELF_RAG_SYSTEM_PROMPT = """你是一个能够自我反思的智能助手。在回答问题时，你可以决定是否需要检索外部知识。
 请遵循以下规则：
 1. 如果不需要检索，直接回答问题。
@@ -627,17 +735,15 @@ SELF_RAG_SYSTEM_PROMPT = """你是一个能够自我反思的智能助手。在�
 5. 如果你认为检索到的信息无助于回答，输出 <REJECT> 并用自己的知识回答。
 """
 
-
 def self_rag_answer(
     question: str,
     history: list[dict[str, str]],
-    decision_model: str = "qwen3.5:9b",
-    generation_model: str = "qwen3.5:9b",
+    decision_model: str = None,
+    generation_model: str = None,
     max_iterations: int = 3,
 ) -> str:
-    decision_model = normalize_model_name(decision_model)
-    generation_model = normalize_model_name(generation_model)
-    # 决策与生成均复用同一个 9B 常驻实例
+    decision_model = normalize_model_name(decision_model or settings.ollama_deep_model)
+    generation_model = normalize_model_name(generation_model or settings.ollama_deep_model)
     decision_llm = get_llm(decision_model, keep_alive=-1)
     generation_llm = get_llm(generation_model, keep_alive=-1)
 
@@ -663,10 +769,7 @@ def self_rag_answer(
             query = retrieve_match.group(1).strip()
             logger.info(f"Self-RAG 检索: {query}")
             docs = retrieve_with_hybrid_and_rerank(query)
-            if docs:
-                context = "\n".join([doc.page_content for doc in docs])
-            else:
-                context = "无相关结果"
+            context = "\n".join([doc.page_content for doc in docs]) if docs else "无相关结果"
             if search is not None:
                 try:
                     web_results = search.invoke(query)
@@ -684,7 +787,6 @@ def self_rag_answer(
     final_response = generation_llm.invoke(messages)
     return final_response.content.strip()
 
-
 @app.post("/chat/selfrag")
 async def chat_selfrag(req: ChatRequest):
     try:
@@ -692,39 +794,75 @@ async def chat_selfrag(req: ChatRequest):
             self_rag_answer,
             req.message,
             req.history,
-            decision_model="qwen3.5:9b",
-            generation_model="qwen3.5:9b",
+            decision_model=settings.ollama_deep_model,
+            generation_model=settings.ollama_deep_model,
         )
         return ChatResponse(response=answer)
     except Exception as e:
         logger.error(f"Self-RAG 请求失败: {e!s}")
         return ChatResponse(response=f"Self-RAG 处理失败: {e!s}")
 
+# ==================== 视觉识别 ====================
+@app.post("/chat/vision")
+async def chat_vision(
+    message: str = Form(""),
+    sessionId: str = Form(""),
+    model: str = Form("qwen3.5"),
+    history: str = Form("[]"),
+    files: list[UploadFile] = File(default=[]),
+):
+    try:
+        hist = json.loads(history)
+    except Exception:
+        hist = []
+
+    images_b64 = []
+    for file in files:
+        content = await file.read()
+        images_b64.append(base64.b64encode(content).decode("utf-8"))
+
+    if not images_b64:
+        return ChatResponse(response="没有收到图片")
+
+    ollama_messages = []
+    for h in hist[-10:]:
+        role = h.get("role")
+        content = h.get("content", "")
+        if role == "system":
+            ollama_messages.append({"role": "system", "content": content})
+        elif role == "user":
+            ollama_messages.append({"role": "user", "content": content})
+        elif role == "assistant":
+            ollama_messages.append({"role": "assistant", "content": content})
+
+    ollama_messages.append({
+        "role": "user",
+        "content": message or "请描述这张图片",
+        "images": images_b64,
+    })
+
+    try:
+        resp = requests.post(
+            f"{settings.ollama_base_url}/api/chat",
+            json={
+                "model": model,
+                "messages": ollama_messages,
+                "stream": False,
+                "options": {"temperature": 0.2},
+            },
+            proxies={"http": None, "https": None},
+            timeout=120,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        answer = data.get("message", {}).get("content", "") or "（模型无返回）"
+    except Exception as e:
+        logger.error(f"视觉模型调用失败: {e}")
+        return ChatResponse(response=f"❌ 视觉模型请求失败: {e}")
+
+    return ChatResponse(response=answer)
 
 # ==================== ReAct Agent 模块（增强版） ====================
-class ToolRegistry:
-    def __init__(self):
-        self._tools: dict[str, Callable] = {}
-        self._descriptions: dict[str, str] = {}
-
-    def register(self, name: str, description: str):
-        def decorator(func: Callable):
-            self._tools[name] = func
-            self._descriptions[name] = description
-            return func
-
-        return decorator
-
-    def get_tool(self, name: str) -> Callable:
-        return self._tools.get(name)
-
-    def get_all_descriptions(self) -> str:
-        return "\n".join([f"- {name}: {desc}" for name, desc in self._descriptions.items()])
-
-
-tool_registry = ToolRegistry()
-
-
 @tool_registry.register("search", "搜索互联网获取实时信息，输入查询字符串")
 async def search_tool(query: str) -> str:
     if search is None:
@@ -734,7 +872,6 @@ async def search_tool(query: str) -> str:
         return str(results)
     except Exception as e:
         return f"搜索失败: {e!s}"
-
 
 @tool_registry.register("calculator", "执行数学计算，输入数学表达式字符串")
 def calculator(expression: str) -> str:
@@ -746,14 +883,12 @@ def calculator(expression: str) -> str:
     except Exception as e:
         return f"计算错误: {e!s}"
 
-
 @tool_registry.register("retrieve_knowledge", "检索本地知识库，输入查询字符串")
 async def retrieve_knowledge(query: str) -> str:
     docs = retrieve_with_hybrid_and_rerank(query)
     if not docs:
         return "未找到相关知识"
     return "\n".join([doc.page_content for doc in docs])
-
 
 # ==================== 记忆系统 ====================
 @dataclass
@@ -765,23 +900,19 @@ class WorkingMemory:
     last_input: str | None = None
     failure_count: int = 0
 
-
 @dataclass
 class EpisodicMemory:
     events: list[dict[str, Any]] = field(default_factory=list)
 
     def add(self, step: int, action: str, input_str: str, output: str, reflection: str = ""):
-        self.events.append(
-            {
-                "step": step,
-                "action": action,
-                "input": input_str,
-                "output": output,
-                "reflection": reflection,
-                "timestamp": time.time(),
-            }
-        )
-
+        self.events.append({
+            "step": step,
+            "action": action,
+            "input": input_str,
+            "output": output,
+            "reflection": reflection,
+            "timestamp": time.time(),
+        })
 
 @dataclass
 class LongTermMemory:
@@ -798,11 +929,10 @@ class LongTermMemory:
         total = stats["success"] + stats["fail"]
         return stats["success"] / total if total > 0 else 0.5
 
-
 # ==================== 反思模块 ====================
 class ReflexionModule:
-    def __init__(self, model_name: str = "qwen3.5:9b"):
-        self.model_name = normalize_model_name(model_name)
+    def __init__(self, model_name: str = None):
+        self.model_name = normalize_model_name(model_name or settings.ollama_deep_model)
 
     def reflect(self, goal: str, action: str, input_str: str, observation: str, history: str) -> str:
         prompt = (
@@ -818,25 +948,42 @@ class ReflexionModule:
         resp = llm.invoke([HumanMessage(content=prompt)])
         return resp.content.strip()
 
-
 # ==================== 增强版 Agent ====================
 class RobustAgentExecutor:
     def __init__(
         self,
-        model_name: str = "qwen3.5:9b",
-        planner_model: str = "qwen3.5:9b",
-        max_steps: int = 8,
-        timeout: int = 180,
-        max_failures: int = 2,
+        model_name: str = None,
+        planner_model: str = None,
+        max_steps: int = 12,
+        timeout: int = 300,
+        max_failures: int = 3,
     ):
-        self.model_name = normalize_model_name(model_name)
-        self.planner_model = normalize_model_name(planner_model)
+        self.model_name = normalize_model_name(model_name or settings.ollama_deep_model)
+        self.planner_model = normalize_model_name(planner_model or settings.ollama_deep_model)
         self.max_steps = max_steps
         self.timeout = timeout
         self.max_failures = max_failures
         self.semaphore = asyncio.Semaphore(2)
-        self.reflexion = ReflexionModule(model_name)
+        self.reflexion = ReflexionModule(self.model_name)
         self.long_term = LongTermMemory()
+        self._tool_result_cache: dict[tuple[str, str], tuple[str, bool]] = {}
+        self._failed_tool_calls: set[tuple[str, str]] = set()
+        self._dynamic_max_steps = self.max_steps
+
+    def _cache_key(self, tool_name: str, tool_input: str) -> tuple[str, str]:
+        return (tool_name.strip().lower(), tool_input.strip().lower()[:200])
+
+    def _get_cached_tool_result(self, tool_name: str, tool_input: str) -> tuple[str, bool] | None:
+        key = self._cache_key(tool_name, tool_input)
+        if key in self._tool_result_cache:
+            result, success = self._tool_result_cache[key]
+            logger.info(f"工具缓存命中: {tool_name} -> {'成功' if success else '失败'}")
+            return result, success
+        return None
+
+    def _set_cached_tool_result(self, tool_name: str, tool_input: str, result: str, success: bool):
+        key = self._cache_key(tool_name, tool_input)
+        self._tool_result_cache[key] = (result, success)
 
     async def _plan_subtasks(self, user_message: str, history: list[dict]) -> list[dict[str, Any]]:
         history_text = ""
@@ -845,17 +992,41 @@ class RobustAgentExecutor:
                 role = "用户" if msg["role"] == "user" else "助手"
                 history_text += f"{role}: {msg['content']}\n"
 
-        prompt = (
-            f"你是任务规划专家。将用户需求拆解为 1–3 个核心子任务，只包含最必要步骤。\n"
-            f"输出必须是严格的 JSON 数组，每个元素包含 id, description, depends_on(依赖的前置id列表)。\n"
-            f"不要输出任何其他文字。\n\n"
+        assess_prompt = (
+            f"你是一个任务复杂度评估专家。请判断以下用户需求的复杂程度，只输出一个数字 1-5：\n"
+            f"1 = 极简单（单步直接回答，如问候、简单事实）\n"
+            f"2 = 简单（1-2 个步骤，如查一个知识点）\n"
+            f"3 = 中等（3-4 个步骤，需要查询+推理+计算）\n"
+            f"4 = 复杂（5-6 个步骤，多工具协作、多源信息整合）\n"
+            f"5 = 极复杂（7+ 个步骤，需要深度推理、多轮验证、代码生成调试）\n"
+            f"只输出单个数字，不要任何解释。\n\n"
+            f"用户需求：{user_message}"
+        )
+        llm = get_llm(self.planner_model, keep_alive=-1)
+        assess_resp = await asyncio.to_thread(llm.invoke, [HumanMessage(content=assess_prompt)])
+        try:
+            complexity = int(''.join(filter(str.isdigit, assess_resp.content.strip()))[:1])
+            complexity = max(1, min(5, complexity))
+        except Exception:
+            complexity = 2
+
+        max_tasks = {1: 1, 2: 2, 3: 4, 4: 6, 5: 8}[complexity]
+        self._dynamic_max_steps = {1: 3, 2: 5, 3: 8, 4: 10, 5: 12}[complexity]
+        logger.info(f"任务复杂度评级: {complexity}/5，计划子任务数: ≤{max_tasks}，单任务步数: ≤{self._dynamic_max_steps}")
+
+        plan_prompt = (
+            f"你是任务规划专家。将用户需求拆解为 **{max_tasks} 个以内** 的原子化子任务。\n"
+            f"要求：\n"
+            f"1. 每个子任务只做一件事（查询 / 计算 / 分析 / 验证）\n"
+            f"2. 子任务之间通过 depends_on 表达依赖关系\n"
+            f"3. 输出必须是严格的 JSON 数组，每个元素包含 id, description, depends_on(列表)\n"
+            f"4. 不要输出任何其他文字\n\n"
             f"用户需求：{user_message}\n"
             f"历史：{history_text}\n\n"
             f"JSON 输出："
         )
 
-        llm = get_llm(self.planner_model, keep_alive=-1)  # 9B 常驻
-        resp = llm.invoke([HumanMessage(content=prompt)])
+        resp = await asyncio.to_thread(llm.invoke, [HumanMessage(content=plan_prompt)])
         try:
             content = resp.content.strip()
             if "```json" in content:
@@ -870,18 +1041,50 @@ class RobustAgentExecutor:
                 st.setdefault("depends_on", [])
                 st.setdefault("status", "pending")
                 st.setdefault("result", "")
-            return subtasks
+            return self._validate_plan(subtasks)
         except Exception as e:
             logger.warning(f"子任务解析失败或为空，回退到单任务模式: {e}")
-            return [
-                {
-                    "id": 0,
-                    "description": user_message,
-                    "depends_on": [],
-                    "status": "pending",
-                    "result": "",
-                }
-            ]
+            return [{"id": 0, "description": user_message, "depends_on": [], "status": "pending", "result": ""}]
+
+    def _validate_plan(self, subtasks: list[dict]) -> list[dict]:
+        graph = {st["id"]: [] for st in subtasks}
+        in_degree = {st["id"]: 0 for st in subtasks}
+        for st in subtasks:
+            for dep in st.get("depends_on", []):
+                if dep in graph:
+                    graph[dep].append(st["id"])
+                    in_degree[st["id"]] += 1
+
+        queue = [k for k, v in in_degree.items() if v == 0]
+        topo = []
+        while queue:
+            node = queue.pop(0)
+            topo.append(node)
+            for nei in graph[node]:
+                in_degree[nei] -= 1
+                if in_degree[nei] == 0:
+                    queue.append(nei)
+
+        if len(topo) != len(subtasks):
+            logger.warning("检测到子任务依赖存在环路，回退到单任务")
+            return [{
+                "id": 0,
+                "description": subtasks[0]["description"] if subtasks else "执行任务",
+                "depends_on": [],
+                "status": "pending",
+                "result": "",
+            }]
+
+        seen = set()
+        filtered = []
+        for st in subtasks:
+            desc = st.get("description", "").strip().lower()[:40]
+            if desc not in seen:
+                seen.add(desc)
+                filtered.append(st)
+        if len(filtered) < len(subtasks):
+            logger.info(f"子任务去重：{len(subtasks)} -> {len(filtered)}")
+        return filtered
 
     def _parse_action(self, content: str) -> dict[str, str] | None:
         content = content.strip()
@@ -911,18 +1114,6 @@ class RobustAgentExecutor:
         return None
 
     async def run(self, user_message: str, history: list[dict] = None) -> str:
-        """执行增强版 ReAct Agent 流程。
-
-        包括任务规划、子任务执行、工具调用、反思和结果综合。
-        支持记忆系统和防重复调用机制。
-
-        Args:
-            user_message: 用户的原始输入。
-            history: 历史对话记录。
-
-        Returns:
-            Agent 的最终回答字符串。
-        """
         async with self.semaphore:
             logger.info(f"启动增强 Agent: {user_message[:50]}...")
             working = WorkingMemory(current_goal=user_message)
@@ -968,8 +1159,8 @@ class RobustAgentExecutor:
             f"可用工具：\n{tool_desc}\n\n"
             f"{memory_hint}\n\n"
             f"规则：\n"
-            f'1. 必须使用 JSON 格式调用工具：{{"tool": "工具名", "input": "输入"}}\n'
-            f'2. 获得足够信息后，输出：{{"final": "最终答案"}} 或直接以 \'Final Answer:\' 开头输出文本。\n'
+            f'1. 必须使用 JSON 格式调用工具：{{"tool": "工具名", "input": "输入"}}\\n'
+            f'2. 获得足够信息后，输出：{{"final": "最终答案"}} 或直接以 \'Final Answer:\' 开头输出文本。\\n'
             f"3. 不要重复调用已成功的工具，直接基于结果作答。\n"
             f"4. 如果连续两次无法提取有效信息，请立即输出 final 答案。\n\n"
             f"历史对话：\n{history_text}"
@@ -980,14 +1171,14 @@ class RobustAgentExecutor:
             HumanMessage(content=f"开始执行子任务：{task['description']}"),
         ]
 
-        # 核心执行模型：9B 复用常驻
         llm = get_llm(self.model_name, keep_alive=-1)
         step = 0
         start_time = time.time()
         used_tools = []
         last_tool_result = None
+        dynamic_limit = getattr(self, '_dynamic_max_steps', self.max_steps)
 
-        while step < self.max_steps and (time.time() - start_time) < self.timeout:
+        while step < dynamic_limit and (time.time() - start_time) < self.timeout:
             step += 1
             response = await asyncio.to_thread(llm.invoke, messages)
             content = response.content.strip()
@@ -999,21 +1190,46 @@ class RobustAgentExecutor:
                 return action["final"]
 
             if action and "tool" in action:
-                tool_name = action["tool"]
+                tool_name = action["tool"].strip()
                 tool_input = action["input"]
-
-                call_sig = f"{tool_name}:{tool_input}"
-                repeat_count = sum(1 for u in used_tools[-6:] if u == call_sig)
-                if repeat_count >= 2:
-                    messages.append(HumanMessage(content="你已经重复调用同一工具多次，请立即输出 final 答案。"))
-                    continue
-                used_tools.append(call_sig)
 
                 tool = tool_registry.get_tool(tool_name)
                 if not tool:
-                    observation = f"错误：未找到工具 '{tool_name}'"
+                    observation = f"错误：未找到工具 '{tool_name}'。可用工具：{list(tool_registry._tools.keys())}"
                     success = False
+                    messages.append(HumanMessage(content=f"Observation: {observation}"))
+                    working.failure_count += 1
+                    if working.failure_count >= self.max_failures:
+                        return f"失败：连续调用不存在工具 {working.failure_count} 次"
+                    continue
+
+                cache_key = self._cache_key(tool_name, tool_input)
+                if cache_key in self._failed_tool_calls:
+                    cached = self._get_cached_tool_result(tool_name, tool_input)
+                    observation = f"[此前已失败，不再重试] {cached[0] if cached else '未知错误'}"
+                    messages.append(HumanMessage(content=f"Observation: {observation}"))
+                    working.failure_count += 1
+                    if working.failure_count >= self.max_failures:
+                        return f"失败：多次调用已确认失败的工具"
+                    continue
+
+                cached = self._get_cached_tool_result(tool_name, tool_input)
+                if cached is not None:
+                    observation, success = cached
+                    if not success:
+                        messages.append(HumanMessage(content=f"Observation: [此前已失败，跳过] {observation}"))
+                        working.failure_count += 1
+                        if working.failure_count >= self.max_failures:
+                            return f"失败：连续 {working.failure_count} 次工具调用失败（含缓存失败）"
+                        continue
                 else:
+                    call_sig = f"{tool_name}:{tool_input}"
+                    repeat_count = sum(1 for u in used_tools[-6:] if u == call_sig)
+                    if repeat_count >= 2:
+                        messages.append(HumanMessage(content="你已经重复调用同一工具多次，请立即输出 final 答案。"))
+                        continue
+                    used_tools.append(call_sig)
+
                     try:
                         if inspect.iscoroutinefunction(tool):
                             observation = await tool(tool_input)
@@ -1024,6 +1240,9 @@ class RobustAgentExecutor:
                     except Exception as e:
                         observation = f"工具执行出错: {e!s}"
                         success = False
+                        self._failed_tool_calls.add(cache_key)
+
+                    self._set_cached_tool_result(tool_name, tool_input, observation, success)
 
                 self.long_term.record_tool_result(tool_name, success)
                 logger.info(f"[{task['description'][:20]}] 工具 {tool_name} -> {'成功' if success else '失败'}")
@@ -1033,11 +1252,7 @@ class RobustAgentExecutor:
                     working.failure_count += 1
                     if working.failure_count <= self.max_failures:
                         reflection = self.reflexion.reflect(
-                            task["description"],
-                            tool_name,
-                            tool_input,
-                            observation,
-                            history_text,
+                            task["description"], tool_name, tool_input, observation, history_text
                         )
                         logger.info(f"反思: {reflection}")
                     else:
@@ -1074,9 +1289,7 @@ class RobustAgentExecutor:
         resp = llm.invoke([HumanMessage(content=prompt)])
         return resp.content.strip()
 
-
 agent_executor = RobustAgentExecutor()
-
 
 @app.post("/agent")
 async def agent_endpoint(req: ChatRequest):
@@ -1087,6 +1300,100 @@ async def agent_endpoint(req: ChatRequest):
         logger.error(f"Agent 运行失败: {e!s}")
         return ChatResponse(response=f"Agent 运行失败: {e!s}")
 
+# ==================== 文档与评估 ====================
+@app.post("/add_docs")
+async def add_docs(files: list[str]):
+    count = add_documents_to_store(files)
+    return {"status": "success", "chunks_added": count}
+
+@app.post("/upload_docs")
+async def upload_docs(files: list[UploadFile] = File(...)):
+    saved_paths = []
+    upload_dir = Path("./uploaded_docs")
+    upload_dir.mkdir(exist_ok=True)
+    for file in files:
+        file_path = upload_dir / f"{__import__('uuid').uuid4().hex}_{file.filename}"
+        with open(file_path, "wb") as f:
+            shutil.copyfileobj(file.file, f)
+        saved_paths.append(str(file_path))
+    count = add_documents_to_store(saved_paths)
+    return {"status": "success", "chunks_added": count, "files": [Path(p).name for p in saved_paths]}
+
+@app.post("/retrieve")
+async def retrieve_contexts(query: str):
+    docs = retrieve_with_hybrid_and_rerank(query)
+    return {"contexts": [doc.page_content for doc in docs]}
+
+@app.get("/eval/report")
+async def get_eval_report():
+    eval_path = Path(settings.eval_file_path)
+    if not eval_path.exists():
+        return {"message": "暂无评估报告"}
+    with open(eval_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    return data
+
+# ==================== 健康检查 ====================
+@app.get("/health")
+async def health():
+    status = {"api": "ok", "timestamp": datetime.now().isoformat()}
+    try:
+        requests.get(f"{settings.ollama_base_url}/api/tags", timeout=5, proxies={"http": None, "https": None})
+        status["ollama"] = "ok"
+    except Exception as e:
+        status["ollama"] = f"error: {e}"
+    try:
+        _ = embedding.embed_query("ping")
+        status["chroma"] = "ok"
+    except Exception as e:
+        status["chroma"] = f"error: {e}"
+    status["tavily"] = "configured" if TAVILY_API_KEY else "not_configured"
+    overall = "ok" if status["ollama"] == "ok" and status["chroma"] == "ok" else "degraded"
+    return {"status": overall, "services": status}
+
+# ==================== 会话持久化 ====================
+def _session_path(sid: str) -> Path:
+    return Path(settings.sessions_dir) / f"{sid}.json"
+
+@app.get("/sessions")
+async def list_sessions():
+    sessions = []
+    for p in Path(settings.sessions_dir).glob("*.json"):
+        try:
+            with open(p, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                sessions.append({
+                    "id": data.get("id", p.stem),
+                    "title": data.get("title", "新对话"),
+                    "updated_at": data.get("updated_at", ""),
+                    "message_count": len(data.get("messages", []))
+                })
+        except Exception:
+            continue
+    return sorted(sessions, key=lambda x: x.get("updated_at", ""), reverse=True)
+
+@app.get("/sessions/{sid}")
+async def get_session(sid: str):
+    path = _session_path(sid)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Session not found")
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+@app.post("/sessions/{sid}")
+async def save_session(sid: str, body: dict):
+    path = _session_path(sid)
+    body["updated_at"] = datetime.now().isoformat()
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(body, f, ensure_ascii=False, indent=2)
+    return {"status": "saved"}
+
+@app.delete("/sessions/{sid}")
+async def delete_session_api(sid: str):
+    path = _session_path(sid)
+    if path.exists():
+        path.unlink()
+    return {"status": "deleted"}
 
 # ==================== 启动 ====================
 if __name__ == "__main__":
@@ -1105,18 +1412,14 @@ if __name__ == "__main__":
     else:
         print("嵌入模型预热最终失败，将在第一次请求时自动重试")
 
-    # 预热 qwen3.5:9b（核心模型，常驻）
-    print("正在预热 LLM (qwen3.5:9b) 常驻...")
+    print(f"正在预热 LLM ({settings.ollama_deep_model}) 常驻...")
     try:
-        warmup_llm = get_llm("qwen3.5:9b", keep_alive=-1)
+        warmup_llm = get_llm(settings.ollama_deep_model, keep_alive=-1)
         _ = warmup_llm.invoke([HumanMessage(content="你好")])
-        print("LLM qwen3.5:9b 预热成功，已常驻显存")
+        print(f"LLM {settings.ollama_deep_model} 预热成功，已常驻显存")
     except Exception as e:
-        print(f"LLM qwen3.5:9b 预热失败: {e}")
+        print(f"LLM {settings.ollama_deep_model} 预热失败: {e}")
 
-    print("🚀 智能助手已启动，支持混合检索+Reranker+多模型协作+链式审查+ReAct Agent+HyDE+Self-RAG")
-    print("   - 所有 Ollama 请求使用 127.0.0.1 (IPv4)，避免 localhost 解析为 ::1 导致 404")
-    print("   - 轻量对话 (/chat)：qwen3.5:4b，keep_alive=0（用后即焚，不占显存）")
-    print("   - 深度推理（审查/Agent/HyDE/Self-RAG）：qwen3.5:9b，keep_alive=-1（常驻显存）")
-    print("   - 模型名称自动规范化：qwen3:14b / qwen2.5:14b -> qwen3.5:9b")
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    print("🚀 智能助手已启动，支持全 GPU 4096 上下文 + 三角形审查 + ReAct Agent + HyDE + Self-RAG + Vision")
+    print(f"   - 上下文长度: {settings.ollama_context_length}")
+    uvicorn.run(app, host=settings.host, port=settings.port)
