@@ -24,7 +24,7 @@ from langchain_community.document_loaders import PyPDFLoader, TextLoader
 from langchain_core.documents import Document
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from rank_bm25 import BM25Okapi
 from sentence_transformers import CrossEncoder
 
@@ -112,7 +112,8 @@ def get_llm(model_name: str, keep_alive: int = -1):
 
     if cache_key not in llm_cache:
         logger.info(f"初始化模型: {model_name} (keep_alive={keep_alive})")
-        llm_cache[cache_key] = __import__("langchain_ollama", fromlist=["ChatOllama"]).ChatOllama(
+        llm_class = __import__("langchain_ollama", fromlist=["ChatOllama"]).ChatOllama
+        llm_cache[cache_key] = llm_class(
             model=model_name,
             temperature=0,
             base_url=settings.ollama_base_url,
@@ -375,7 +376,7 @@ app.add_middleware(
 class ChatRequest(BaseModel):
     message: str
     model: str = None
-    history: list[dict[str, str]] = []
+    history: list[dict[str, str]] = Field(default_factory=list)
     models: list[str] | None = None
 
 
@@ -700,7 +701,7 @@ def generate_hypothetical_answer(question: str, model_name: str = None) -> str:
     return resp.content.strip()
 
 
-def hyde_retrieve_and_answer(question: str, history: list[dict[str, str]], model_name: str = None) -> str:
+def hyde_retrieve_and_answer(question: str, history: list[dict], model_name: str = None) -> str:
     model_name = normalize_model_name(model_name or settings.ollama_deep_model)
     hypothetical = generate_hypothetical_answer(question)
     local_docs = retrieve_with_hybrid_and_rerank(hypothetical)
