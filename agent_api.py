@@ -1210,7 +1210,7 @@ class RobustAgentExecutor:
                     messages.append(HumanMessage(content=f"Observation: {observation}"))
                     working.failure_count += 1
                     if working.failure_count >= self.max_failures:
-                        return f"失败：多次调用已确认失败的工具"
+                        return "失败：多次调用已确认失败的工具"
                     continue
 
                 cached = self._get_cached_tool_result(tool_name, tool_input)
