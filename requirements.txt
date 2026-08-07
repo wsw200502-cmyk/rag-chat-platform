@@ -1,3 +1,4 @@
+--extra-index-url https://download.pytorch.org/whl/cpu
 fastapi
 uvicorn
 pydantic
@@ -15,5 +16,4 @@ sentence-transformers
 requests
 pytest
 pytest-asyncio
---index-url https://download.pytorch.org/whl/cpu
 torch
