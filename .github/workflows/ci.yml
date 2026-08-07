@@ -1,4 +1,4 @@
-﻿name: CI
+name: CI
 
 on: [push, pull_request]
 
@@ -10,8 +10,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - run: pip install pytest pytest-asyncio
-      - run: python -m pytest tests/ -v
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-asyncio
+      - name: Run tests
+        run: python -m pytest tests/ -v
 
   lint:
     runs-on: ubuntu-latest
@@ -20,6 +25,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - run: pip install ruff
-      - run: ruff check agent_api.py tests/
-      - run: ruff format --check agent_api.py tests/
+      - name: Install ruff
+        run: pip install ruff
+      - name: Lint check
+        run: ruff check agent_api.py tests/
+      - name: Format check
+        run: ruff format --check agent_api.py tests/
