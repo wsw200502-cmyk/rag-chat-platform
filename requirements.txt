@@ -1,4 +1,4 @@
-﻿fastapi
+fastapi
 uvicorn
 pydantic
 python-dotenv
@@ -12,5 +12,8 @@ langchain-tavily
 chromadb
 rank-bm25
 sentence-transformers
+requests
+pytest
+pytest-asyncio
 --index-url https://download.pytorch.org/whl/cpu
 torch
