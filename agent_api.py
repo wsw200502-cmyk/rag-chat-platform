@@ -1,4 +1,4 @@
-﻿import asyncio
+import asyncio
 import base64
 import inspect
 import json
@@ -92,7 +92,7 @@ def get_llm(model_name: str, keep_alive: int = -1):
     global _active_model_key
     model_name = normalize_model_name(model_name)
     cache_key = (model_name, keep_alive)
-    
+
     if keep_alive == -1 and _active_model_key != cache_key and _active_model_key is not None:
         logger.info(f"显存管理: 释放之前常驻模型 {_active_model_key[0]}")
         try:
@@ -106,7 +106,7 @@ def get_llm(model_name: str, keep_alive: int = -1):
             logger.debug(f"释放模型显存时出错: {e}")
         if _active_model_key in llm_cache:
             del llm_cache[_active_model_key]
-    
+
     if cache_key not in llm_cache:
         logger.info(f"初始化模型: {model_name} (keep_alive={keep_alive})")
         llm_cache[cache_key] = __import__(
@@ -119,7 +119,7 @@ def get_llm(model_name: str, keep_alive: int = -1):
             num_ctx=settings.ollama_context_length,
             keep_alive=keep_alive,
         )
-    
+
     if keep_alive == -1:
         _active_model_key = cache_key
     return llm_cache[cache_key]
@@ -635,7 +635,7 @@ async def chat_review(req: ChatRequest):
         )
         try:
             final_answer = await agent_b.think(revision_prompt, req.history) if analysis else await agent_c.think(revision_prompt, req.history)
-        except:
+        except Exception:
             final_answer = draft  # 修订失败则返回原草案
         status_tag = (
             f"\n\n[三角形协作日志]\n"
