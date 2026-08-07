@@ -13,4 +13,4 @@ chromadb
 rank-bm25
 sentence-transformers
 --index-url https://download.pytorch.org/whl/cpu
-torch
+torchrequests
