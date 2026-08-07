@@ -37,7 +37,7 @@ Path(settings.sessions_dir).mkdir(parents=True, exist_ok=True)
 Path(settings.chroma_persist_dir).mkdir(parents=True, exist_ok=True)
 Path("./uploaded_docs").mkdir(parents=True, exist_ok=True)
 
-# ========== �?禁用系统代理 ==========
+# ========== ① 禁用系统代理 ==========
 os.environ["HTTP_PROXY"] = ""
 os.environ["HTTPS_PROXY"] = ""
 os.environ["ALL_PROXY"] = ""
@@ -64,7 +64,7 @@ TAVILY_API_KEY = settings.tavily_api_key or os.getenv("TAVILY_API_KEY")
 if TAVILY_API_KEY:
     from langchain_tavily import TavilySearch
 
-# ==================== 结构化日�?====================
+# ==================== 结构化日志 ====================
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -73,10 +73,10 @@ logging.basicConfig(
 logger = logging.getLogger("agent_api")
 
 if not TAVILY_API_KEY:
-    logger.warning("TAVILY_API_KEY 未设置，网络搜索功能将不可用�?)
+    logger.warning("TAVILY_API_KEY 未设置，网络搜索功能将不可用。")
 
 
-# ==================== 模型名称规范�?====================
+# ==================== 模型名称规范化 ====================
 def normalize_model_name(name: str) -> str:
     mapping = {
         "qwen2.5:14b": "qwen3.5:9b",
@@ -91,7 +91,7 @@ _active_model_key = None
 
 
 def get_llm(model_name: str, keep_alive: int = -1):
-    """获取LLM，支持显存管理：8G显存一次只常驻一个模�?""
+    """获取LLM，支持显存管理：8G显存一次只常驻一个模型"""
     global _active_model_key
     model_name = normalize_model_name(model_name)
     cache_key = (model_name, keep_alive)
@@ -106,12 +106,12 @@ def get_llm(model_name: str, keep_alive: int = -1):
                 timeout=10,
             )
         except Exception as e:
-            logger.debug(f"释放模型显存时出�? {e}")
+            logger.debug(f"释放模型显存时出错: {e}")
         if _active_model_key in llm_cache:
             del llm_cache[_active_model_key]
 
     if cache_key not in llm_cache:
-        logger.info(f"初始化模�? {model_name} (keep_alive={keep_alive})")
+        logger.info(f"初始化模型: {model_name} (keep_alive={keep_alive})")
         llm_cache[cache_key] = __import__("langchain_ollama", fromlist=["ChatOllama"]).ChatOllama(
             model=model_name,
             temperature=0,
@@ -126,7 +126,7 @@ def get_llm(model_name: str, keep_alive: int = -1):
     return llm_cache[cache_key]
 
 
-# ==================== 自定�?Embedding ====================
+# ==================== 自定义 Embedding ====================
 class OllamaEmbeddingDirect:
     def __init__(self, model: str = None, base_url: str = None):
         self.model = model or settings.ollama_embed_model
@@ -155,7 +155,7 @@ class OllamaEmbeddingDirect:
 
 embedding = OllamaEmbeddingDirect()
 
-# ==================== 向量数据�?====================
+# ==================== 向量数据库 ====================
 vectorstore = Chroma(
     persist_directory=settings.chroma_persist_dir,
     embedding_function=embedding,
@@ -167,7 +167,7 @@ if TAVILY_API_KEY:
 else:
     search = None
 
-# ==================== 混合检�?====================
+# ==================== 混合检索 ====================
 global_documents_text: list[str] = []
 bm25_index = None
 
@@ -214,7 +214,7 @@ def add_documents_to_store(file_paths: list[str]) -> int:
     return len(chunks)
 
 
-# ==================== 混合检�?+ Rerank ====================
+# ==================== 混合检索 + Rerank ====================
 def retrieve_with_hybrid_and_rerank(
     query: str,
     k_vector: int = 10,
@@ -229,11 +229,11 @@ def retrieve_with_hybrid_and_rerank(
             break
         except Exception as e:
             if "502" in str(e) and attempt < max_retries - 1:
-                logger.warning(f"向量检索失败，重试�? {e}")
+                logger.warning(f"向量检索失败，重试中: {e}")
                 time.sleep(2**attempt + 3)
                 continue
             else:
-                logger.error(f"向量检索最终失�? {e}")
+                logger.error(f"向量检索最终失败: {e}")
                 vec_docs = []
                 break
 
@@ -264,8 +264,8 @@ def build_messages(
     extra_context: str = "",
 ) -> list:
     local_docs = retrieve_with_hybrid_and_rerank(question)
-    local_context = "\n".join([doc.page_content for doc in local_docs]) if local_docs else "无相关本地知�?
-    web_context = "网络搜索不可用（未配�?API Key�?
+    local_context = "\n".join([doc.page_content for doc in local_docs]) if local_docs else "无相关本地知识"
+    web_context = "网络搜索不可用（未配置 API Key）"
     if search is not None:
         try:
             web_results = search.invoke(question)
@@ -285,7 +285,7 @@ def build_messages(
                 "1. 如果是闲聊，自然回复，无需代码。\n"
                 "2. 只在明确要求写代码时才输出代码块。\n"
                 "3. 代码需完整可运行，置于 Markdown 代码块中。\n"
-                "4. 如果用户要求“只输出代码”，仅输出代码块�?
+                "4. 如果用户要求“只输出代码”，仅输出代码块。"
             )
         )
     ]
@@ -300,7 +300,7 @@ def build_messages(
     return messages
 
 
-# ==================== 后处�?====================
+# ==================== 后处理 ====================
 def post_process(content: str, question: str) -> str:
     content = re.sub(r"^ython\b", r"```python", content, flags=re.MULTILINE)
     content = re.sub(r"^thon\b", r"```python", content, flags=re.MULTILINE)
@@ -316,7 +316,7 @@ def post_process(content: str, question: str) -> str:
     if any(kw in content for kw in ["import ", "def ", "print(", "class "]) and "```" not in content:
         content = f"```python\n{content.strip()}\n```"
 
-    if any(kw in question for kw in ["只输出代�?, "只给我代�?, "只要代码", "去掉所有文�?, "我只要代�?]):
+    if any(kw in question for kw in ["只输出代码", "只给我代码", "只要代码", "去掉所有文本", "我只要代码"]):
         code_blocks = re.findall(r"```(?:\w+)?\n(.*?)\n```", content, re.DOTALL)
         if code_blocks:
             return code_blocks[0].strip()
@@ -325,7 +325,7 @@ def post_process(content: str, question: str) -> str:
     return content
 
 
-# ==================== 非流式接�?====================
+# ==================== 非流式接口 ====================
 def generate_answer(
     question: str,
     history: list[dict[str, str]],
@@ -339,11 +339,11 @@ def generate_answer(
     return post_process(response.content, question)
 
 
-# ==================== 多模型协�?====================
+# ==================== 多模型协作 ====================
 def generate_collaborative(question: str, history: list[dict[str, str]]) -> str:
     planner = get_llm(settings.ollama_deep_model, keep_alive=-1)
     planner_prompt = (
-        "你是一个任务规划专家。将用户需求分解为清晰的步骤，并生成优化的提示词�?
+        "你是一个任务规划专家。将用户需求分解为清晰的步骤，并生成优化的提示词。"
         "只输出优化后的提示词，不要解释。\n"
         f"用户需求：{question}"
     )
@@ -419,7 +419,7 @@ async def chat_multi(req: ChatRequest):
     return ChatResponse(response=answer)
 
 
-# ==================== 三角形多Agent协作架构（内切圆共享核心�?====================
+# ==================== 三角形多Agent协作架构（内切圆共享核心） ====================
 class SharedCore:
     def __init__(self):
         self.memory: dict[str, Any] = {}
@@ -433,7 +433,7 @@ class SharedCore:
 
     def web_search(self, query: str) -> str:
         if search is None:
-            return "网络搜索不可用（未配�?API Key�?
+            return "网络搜索不可用（未配置 API Key）"
         try:
             result = str(search.invoke(query))
             return result
@@ -483,7 +483,7 @@ class TriangleAgent:
                 content=(
                     f"你是 {self.name}。\n"
                     f"角色定位：{self.role_desc}\n"
-                    f"当前日期：{datetime.now().strftime('%Y�?m�?d�?)}"
+                    f"当前日期：{datetime.now().strftime('%Y年%m月%d日')}"
                 )
             )
         ]
@@ -504,7 +504,7 @@ class TriangleAgent:
             except Exception as e:
                 if "502" in str(e) and attempt < max_retries - 1:
                     wait_time = 2**attempt + 10
-                    logger.warning(f"[{self.name}] LLM 502，等�?{wait_time}s 重试 {attempt + 1}/{max_retries}")
+                    logger.warning(f"[{self.name}] LLM 502，等待 {wait_time}s 重试 {attempt + 1}/{max_retries}")
                     time.sleep(wait_time)
                 else:
                     raise e
@@ -512,7 +512,7 @@ class TriangleAgent:
     async def analyze(self, question: str, history: list[dict] = None) -> str:
         docs = await self.core.retrieve(question)
         self.core.store("phase1_docs", docs)
-        local_ctx = "\n".join([d.page_content for d in docs]) if docs else "无相关本地知�?
+        local_ctx = "\n".join([d.page_content for d in docs]) if docs else "无相关本地知识"
         web_ctx = self.core.web_search(question)
 
         prompt = (
@@ -520,13 +520,13 @@ class TriangleAgent:
             f"问题：{question}\n"
             f"参考资料：{local_ctx}\n"
             f"网络搜索摘要：{web_ctx}\n\n"
-            f"只需列出关键点，不要展开�?
+            f"只需列出关键点，不要展开。"
         )
         return await self.think(prompt, history)
 
     async def generate(self, question: str, analysis: str, history: list[dict] = None) -> str:
         docs = self.core.get("phase1_docs") or await self.core.retrieve(question)
-        local_ctx = "\n".join([d.page_content for d in docs]) if docs else "无相关本地知�?
+        local_ctx = "\n".join([d.page_content for d in docs]) if docs else "无相关本地知识"
         web_ctx = self.core.web_search(question)
 
         prompt = (
@@ -535,20 +535,20 @@ class TriangleAgent:
             f"分析：{analysis}\n"
             f"本地资料：{local_ctx}\n"
             f"网络搜索：{web_ctx}\n\n"
-            f"请给出准确、简洁的答案�?
+            f"请给出准确、简洁的答案。"
         )
         return await self.think(prompt, history)
 
     async def verify(self, question: str, analysis: str, draft: str, history: list[dict] = None) -> str:
         verify_docs = await self.core.retrieve(f"验证：{question}", final_k=5)
-        verify_ctx = "\n".join([d.page_content for d in verify_docs]) if verify_docs else "无相关验证资�?
+        verify_ctx = "\n".join([d.page_content for d in verify_docs]) if verify_docs else "无相关验证资料"
 
         prompt = (
             f"请审查以下答案是否准确、完整。\n"
             f"问题：{question}\n"
             f"答案：{draft}\n"
             f"验证资料：{verify_ctx}\n\n"
-            f"如果准确无误，回复“VERIFIED”；否则回复“REVISION: 具体问题”�?
+            f"如果准确无误，回复“VERIFIED”；否则回复“REVISION: 具体问题”。"
         )
         return await self.think(prompt, history)
 
@@ -577,7 +577,7 @@ class ToolRegistry:
 tool_registry = ToolRegistry()
 
 
-# ==================== /chat/review 端点（含容错�?====================
+# ==================== /chat/review 端点（含容错） ====================
 @app.post("/chat/review")
 async def chat_review(req: ChatRequest):
     for i in range(5):
@@ -586,22 +586,22 @@ async def chat_review(req: ChatRequest):
             break
         except Exception as e:
             if i < 4:
-                logger.warning(f"嵌入预热失败，重�?{i + 1}/5: {e}")
+                logger.warning(f"嵌入预热失败，重试 {i + 1}/5: {e}")
                 time.sleep(2)
             else:
-                logger.error(f"嵌入预热最终失�? {e}")
+                logger.error(f"嵌入预热最终失败: {e}")
 
     models = req.models or [settings.ollama_deep_model] * 3
     models = [normalize_model_name(m) for m in models]
     if len(models) < 3:
-        return ChatResponse(response="三角形协作审查模式需要至少三个模�?)
+        return ChatResponse(response="三角形协作审查模式需要至少三个模型")
 
     core = SharedCore()
-    agent_a = TriangleAgent("Agent-A·分析", models[0], "需求分析专�?, core)
+    agent_a = TriangleAgent("Agent-A·分析", models[0], "需求分析专家", core)
     agent_b = TriangleAgent("Agent-B·生成", models[1], "答案生成专家", core)
     agent_c = TriangleAgent("Agent-C·审查", models[2], "事实核查专家", core)
 
-    # ----- 阶段1：分�?-----
+    # ----- 阶段1：分析 -----
     try:
         analysis = await agent_a.analyze(req.message, req.history)
         core.store("analysis", analysis)
@@ -622,40 +622,40 @@ async def chat_review(req: ChatRequest):
             draft = None
 
     if not draft:
-        logger.warning("Agent-B 故障，启�?Agent-C 接管生成")
+        logger.warning("Agent-B 故障，启用 Agent-C 接管生成")
         try:
             takeover_prompt = (
-                f"Agent-A �?Agent-B 均未产出有效草案。请直接根据以下信息回答用户问题。\n"
+                f"Agent-A 和 Agent-B 均未产出有效草案。请直接根据以下信息回答用户问题。\n"
                 f"问题：{req.message}\n"
-                f"分析：{analysis or '�?}\n"
-                f"请给出简洁准确的答案�?
+                f"分析：{analysis or '无'}\n"
+                f"请给出简洁准确的答案。"
             )
             draft = await agent_c.think(takeover_prompt, req.history)
             core.store("draft", draft)
             logger.info("Agent-C 接管生成完成")
         except Exception as e:
-            logger.error(f"Agent-C 接管也失�? {e}")
+            logger.error(f"Agent-C 接管也失败: {e}")
             return ChatResponse(response=f"三角形协作完全失败：{e!s}")
 
-    # ----- 阶段3：审�?-----
+    # ----- 阶段3：审查 -----
     try:
         review = await agent_c.verify(req.message, analysis or "", draft, req.history)
         core.store("review", review)
         logger.info("[Phase 3] 审查完成")
     except Exception as e:
         logger.error(f"Agent-C 审查失败: {e}")
-        review = "审查不可�?
+        review = "审查不可用"
 
     # ----- 综合仲裁 -----
     needs_revision = any(kw in review.upper() for kw in ["REVISION", "FAIL", "修改", "错误", "不通过"])
     if needs_revision:
         docs = core.get("phase1_docs") or await core.retrieve(req.message)
-        local_ctx = "\n".join([d.page_content for d in docs]) if docs else "无相关本地知�?
+        local_ctx = "\n".join([d.page_content for d in docs]) if docs else "无相关本地知识"
         revision_prompt = (
             f"你的答案草案未通过事实核查。\n\n"
             f"审查意见：{review}\n\n"
             f"原始问题：{req.message}\n"
-            f"Agent-A 分析：{analysis or '�?}\n\n"
+            f"Agent-A 分析：{analysis or '无'}\n\n"
             f"共享检索资料：\n{local_ctx}\n\n"
             f"请根据审查意见和共享资料修订答案，确保事实准确："
         )
@@ -669,19 +669,19 @@ async def chat_review(req: ChatRequest):
             final_answer = draft  # 修订失败则返回原草案
         status_tag = (
             f"\n\n[三角形协作日志]\n"
-            f"- Agent-A 分析: {'�? if analysis else '�?失败'}\n"
-            f"- Agent-B 生成: {'�? if analysis and draft else '�?失败 (已接�?'}\n"
-            f"- Agent-C 审查: �?未通过\n"
-            f"- 修订: �?已执行\n"
+            f"- Agent-A 分析: {'✓' if analysis else '✗ 失败'}\n"
+            f"- Agent-B 生成: {'✓' if analysis and draft else '✗ 失败 (已接管)'}\n"
+            f"- Agent-C 审查: ✗ 未通过\n"
+            f"- 修订: ✓ 已执行\n"
             f"- 审查详情: {review[:200]}"
         )
     else:
         final_answer = draft
         status_tag = (
             f"\n\n[三角形协作日志]\n"
-            f"- Agent-A 分析: {'�? if analysis else '�?失败'}\n"
-            f"- Agent-B 生成: {'�? if analysis and draft else '�?失败 (已接�?'}\n"
-            f"- Agent-C 审查: �?通过\n"
+            f"- Agent-A 分析: {'✓' if analysis else '✗ 失败'}\n"
+            f"- Agent-B 生成: {'✓' if analysis and draft else '✗ 失败 (已接管)'}\n"
+            f"- Agent-C 审查: ✓ 通过\n"
             f"- 审查详情: {review[:200]}"
         )
 
@@ -691,10 +691,10 @@ async def chat_review(req: ChatRequest):
 # ==================== HyDE ====================
 def generate_hypothetical_answer(question: str, model_name: str = None) -> str:
     model_name = normalize_model_name(model_name or settings.ollama_deep_model)
-    prompt = f"""请根据你的知识，为以下问题生成一段假设性的回答（哪怕不知道确切答案，也请给出合理的推测性描述）。只需输出回答内容，不需要解释�?
+    prompt = f"""请根据你的知识，为以下问题生成一段假设性的回答（哪怕不知道确切答案，也请给出合理的推测性描述）。只需输出回答内容，不需要解释。
 
 问题：{question}
-假设答案�?""
+假设答案："""
     llm = get_llm(model_name, keep_alive=-1)
     resp = llm.invoke([HumanMessage(content=prompt)])
     return resp.content.strip()
@@ -704,7 +704,7 @@ def hyde_retrieve_and_answer(question: str, history: list[dict[str, str]], model
     model_name = normalize_model_name(model_name or settings.ollama_deep_model)
     hypothetical = generate_hypothetical_answer(question)
     local_docs = retrieve_with_hybrid_and_rerank(hypothetical)
-    local_context = "\n".join([doc.page_content for doc in local_docs]) if local_docs else "无相关本地知�?
+    local_context = "\n".join([doc.page_content for doc in local_docs]) if local_docs else "无相关本地知识"
 
     messages = [
         SystemMessage(
@@ -714,7 +714,7 @@ def hyde_retrieve_and_answer(question: str, history: list[dict[str, str]], model
                 "1. 如果是闲聊，自然回复，无需代码。\n"
                 "2. 只在明确要求写代码时才输出代码块。\n"
                 "3. 代码需完整可运行，置于 Markdown 代码块中。\n"
-                "4. 如果用户要求“只输出代码”，仅输出代码块�?
+                "4. 如果用户要求“只输出代码”，仅输出代码块。"
             )
         )
     ]
@@ -747,27 +747,27 @@ async def chat_hyde(req: ChatRequest):
 def should_retrieve(question: str) -> bool:
     chat_keywords = [
         "你好",
-        "�?,
+        "嗨",
         "hello",
         "hi",
         "谢谢",
         "再见",
         "拜拜",
         "在吗",
-        "早上�?,
-        "晚上�?,
+        "早上好",
+        "晚上好",
     ]
     lowered = question.lower().strip()
     return not any(kw in lowered for kw in chat_keywords)
 
 
-SELF_RAG_SYSTEM_PROMPT = """你是一个能够自我反思的智能助手。在回答问题时，你可以决定是否需要检索外部知识�?
+SELF_RAG_SYSTEM_PROMPT = """你是一个能够自我反思的智能助手。在回答问题时，你可以决定是否需要检索外部知识。
 请遵循以下规则：
-1. 如果不需要检索，直接回答问题�?
-2. 如果需要检索，输出�?RETRIEVE> 查询关键�?</RETRIEVE>，然后停止。系统会为你提供检索结果�?
-3. 收到检索结果后，你可以再次决定是否需要进一步检索（输出另一�?<RETRIEVE>），或者直接给出最终答案�?
-4. 当你认为信息足够时，输出最终答案�?
-5. 如果你认为检索到的信息无助于回答，输�?<REJECT> 并用自己的知识回答�?
+1. 如果不需要检索，直接回答问题。
+2. 如果需要检索，输出：<RETRIEVE> 查询关键词 </RETRIEVE>，然后停止。系统会为你提供检索结果。
+3. 收到检索结果后，你可以再次决定是否需要进一步检索（输出另一个 <RETRIEVE>），或者直接给出最终答案。
+4. 当你认为信息足够时，输出最终答案。
+5. 如果你认为检索到的信息无助于回答，输出 <REJECT> 并用自己的知识回答。
 """
 
 
@@ -803,22 +803,22 @@ def self_rag_answer(
 
         if retrieve_match:
             query = retrieve_match.group(1).strip()
-            logger.info(f"Self-RAG 检�? {query}")
+            logger.info(f"Self-RAG 检索: {query}")
             docs = retrieve_with_hybrid_and_rerank(query)
-            context = "\n".join([doc.page_content for doc in docs]) if docs else "无相关结�?
+            context = "\n".join([doc.page_content for doc in docs]) if docs else "无相关结果"
             if search is not None:
                 try:
                     web_results = search.invoke(query)
                     context += "\n\n网络搜索结果：\n" + str(web_results)
                 except Exception as e:
                     logger.warning(f"网络搜索失败: {e}")
-            messages.append(HumanMessage(content=f"检索结果：\n{context}\n\n请根据检索结果继续回答，或继续检索�?))
+            messages.append(HumanMessage(content=f"检索结果：\n{context}\n\n请根据检索结果继续回答，或继续检索。"))
         elif reject_match or not retrieve_match:
             break
         else:
             break
 
-    final_prompt = "请根据以上所有信息和检索结果，给出最终答案�?
+    final_prompt = "请根据以上所有信息和检索结果，给出最终答案。"
     messages.append(HumanMessage(content=final_prompt))
     final_response = generation_llm.invoke(messages)
     return final_response.content.strip()
@@ -876,7 +876,7 @@ async def chat_vision(
     ollama_messages.append(
         {
             "role": "user",
-            "content": message or "请描述这张图�?,
+            "content": message or "请描述这张图片",
             "images": images_b64,
         }
     )
@@ -895,19 +895,19 @@ async def chat_vision(
         )
         resp.raise_for_status()
         data = resp.json()
-        answer = data.get("message", {}).get("content", "") or "（模型无返回�?
+        answer = data.get("message", {}).get("content", "") or "（模型无返回）"
     except Exception as e:
         logger.error(f"视觉模型调用失败: {e}")
-        return ChatResponse(response=f"�?视觉模型请求失败: {e}")
+        return ChatResponse(response=f"❌ 视觉模型请求失败: {e}")
 
     return ChatResponse(response=answer)
 
 
-# ==================== ReAct Agent 模块（增强版�?====================
-@tool_registry.register("search", "搜索互联网获取实时信息，输入查询字符�?)
+# ==================== ReAct Agent 模块（增强版） ====================
+@tool_registry.register("search", "搜索互联网获取实时信息，输入查询字符串")
 async def search_tool(query: str) -> str:
     if search is None:
-        return "网络搜索不可用，请设�?TAVILY_API_KEY"
+        return "网络搜索不可用，请设置 TAVILY_API_KEY"
     try:
         results = search.invoke(query)
         return str(results)
@@ -915,12 +915,12 @@ async def search_tool(query: str) -> str:
         return f"搜索失败: {e!s}"
 
 
-@tool_registry.register("calculator", "执行数学计算，输入数学表达式字符�?)
+@tool_registry.register("calculator", "执行数学计算，输入数学表达式字符串")
 def calculator(expression: str) -> str:
     try:
         allowed = set("0123456789+-*/().% ")
         if not all(c in allowed for c in expression):
-            return "不允许的表达�?
+            return "不允许的表达式"
         return str(eval(expression))
     except Exception as e:
         return f"计算错误: {e!s}"
@@ -930,7 +930,7 @@ def calculator(expression: str) -> str:
 async def retrieve_knowledge(query: str) -> str:
     docs = retrieve_with_hybrid_and_rerank(query)
     if not docs:
-        return "未找到相关知�?
+        return "未找到相关知识"
     return "\n".join([doc.page_content for doc in docs])
 
 
@@ -978,7 +978,7 @@ class LongTermMemory:
         return stats["success"] / total if total > 0 else 0.5
 
 
-# ==================== 反思模�?====================
+# ==================== 反思模块 ====================
 class ReflexionModule:
     def __init__(self, model_name: str = None):
         self.model_name = normalize_model_name(model_name or settings.ollama_deep_model)
@@ -990,7 +990,7 @@ class ReflexionModule:
             f"动作：{action}\n"
             f"输入：{input_str}\n"
             f"结果：{observation}\n\n"
-            f"请用一句话总结�?) 为什么失败；2) 下一步应该调整什么策略。\n"
+            f"请用一句话总结：1) 为什么失败；2) 下一步应该调整什么策略。\n"
             f"反思："
         )
         llm = get_llm(self.model_name, keep_alive=-1)  # 复用 9B 常驻
@@ -998,7 +998,7 @@ class ReflexionModule:
         return resp.content.strip()
 
 
-# ==================== 增强�?Agent ====================
+# ==================== 增强版 Agent ====================
 class RobustAgentExecutor:
     def __init__(
         self,
@@ -1043,11 +1043,11 @@ class RobustAgentExecutor:
                 history_text += f"{role}: {msg['content']}\n"
 
         assess_prompt = (
-            f"你是一个任务复杂度评估专家。请判断以下用户需求的复杂程度，只输出一个数�?1-5：\n"
+            f"你是一个任务复杂度评估专家。请判断以下用户需求的复杂程度，只输出一个数字 1-5：\n"
             f"1 = 极简单（单步直接回答，如问候、简单事实）\n"
             f"2 = 简单（1-2 个步骤，如查一个知识点）\n"
-            f"3 = 中等�?-4 个步骤，需要查�?推理+计算）\n"
-            f"4 = 复杂�?-6 个步骤，多工具协作、多源信息整合）\n"
+            f"3 = 中等（3-4 个步骤，需要查询+推理+计算）\n"
+            f"4 = 复杂（5-6 个步骤，多工具协作、多源信息整合）\n"
             f"5 = 极复杂（7+ 个步骤，需要深度推理、多轮验证、代码生成调试）\n"
             f"只输出单个数字，不要任何解释。\n\n"
             f"用户需求：{user_message}"
@@ -1063,19 +1063,19 @@ class RobustAgentExecutor:
         max_tasks = {1: 1, 2: 2, 3: 4, 4: 6, 5: 8}[complexity]
         self._dynamic_max_steps = {1: 3, 2: 5, 3: 8, 4: 10, 5: 12}[complexity]
         logger.info(
-            f"任务复杂度评�? {complexity}/5，计划子任务�? ≤{max_tasks}，单任务步数: ≤{self._dynamic_max_steps}"
+            f"任务复杂度评级: {complexity}/5，计划子任务数: ≤{max_tasks}，单任务步数: ≤{self._dynamic_max_steps}"
         )
 
         plan_prompt = (
-            f"你是任务规划专家。将用户需求拆解为 **{max_tasks} 个以�?* 的原子化子任务。\n"
+            f"你是任务规划专家。将用户需求拆解为 **{max_tasks} 个以内** 的原子化子任务。\n"
             f"要求：\n"
-            f"1. 每个子任务只做一件事（查�?/ 计算 / 分析 / 验证）\n"
+            f"1. 每个子任务只做一件事（查询 / 计算 / 分析 / 验证）\n"
             f"2. 子任务之间通过 depends_on 表达依赖关系\n"
-            f"3. 输出必须是严格的 JSON 数组，每个元素包�?id, description, depends_on(列表)\n"
+            f"3. 输出必须是严格的 JSON 数组，每个元素包含 id, description, depends_on(列表)\n"
             f"4. 不要输出任何其他文字\n\n"
             f"用户需求：{user_message}\n"
             f"历史：{history_text}\n\n"
-            f"JSON 输出�?
+            f"JSON 输出："
         )
 
         resp = await asyncio.to_thread(llm.invoke, [HumanMessage(content=plan_prompt)])
@@ -1087,7 +1087,7 @@ class RobustAgentExecutor:
                 content = content.split("```")[1].split("```")[0]
             subtasks = json.loads(content.strip())
             if not subtasks or len(subtasks) == 0:
-                raise ValueError("空列�?)
+                raise ValueError("空列表")
             for i, st in enumerate(subtasks):
                 st.setdefault("id", i)
                 st.setdefault("depends_on", [])
@@ -1173,7 +1173,7 @@ class RobustAgentExecutor:
             working = WorkingMemory(current_goal=user_message)
             episodic = EpisodicMemory()
             working.subtasks = await self._plan_subtasks(user_message, history)
-            logger.info(f"规划子任�? {len(working.subtasks)} �?)
+            logger.info(f"规划子任务: {len(working.subtasks)} 个")
             all_results = []
             for task in working.subtasks:
                 if task["status"] == "completed":
@@ -1206,15 +1206,15 @@ class RobustAgentExecutor:
                 [f"- {k}: {v[:100]}" for k, v in working.intermediate_results.items()]
             )
 
-        current_date = datetime.now().strftime("%Y�?m�?d�?)
+        current_date = datetime.now().strftime("%Y年%m月%d日")
         system_prompt = (
-            f"你是一个智�?Agent，当前子任务：{task['description']}\n"
+            f"你是一个智能 Agent，当前子任务：{task['description']}\n"
             f"当前日期：{current_date}\n\n"
             f"可用工具：\n{tool_desc}\n\n"
             f"{memory_hint}\n\n"
             f"规则：\n"
-            f'1. 必须使用 JSON 格式调用工具：{{"tool": "工具�?, "input": "输入"}}\\n'
-            f'2. 获得足够信息后，输出：{{"final": "最终答�?}} 或直接以 \'Final Answer:\' 开头输出文本。\\n'
+            f'1. 必须使用 JSON 格式调用工具：{{"tool": "工具名", "input": "输入"}}\\n'
+            f'2. 获得足够信息后，输出：{{"final": "最终答案"}} 或直接以 \'Final Answer:\' 开头输出文本。\\n'
             f"3. 不要重复调用已成功的工具，直接基于结果作答。\n"
             f"4. 如果连续两次无法提取有效信息，请立即输出 final 答案。\n\n"
             f"历史对话：\n{history_text}"
@@ -1240,7 +1240,7 @@ class RobustAgentExecutor:
 
             action = self._parse_action(content)
             if action and "final" in action:
-                logger.info(f"子任务完�? {task['description'][:30]}...")
+                logger.info(f"子任务完成: {task['description'][:30]}...")
                 return action["final"]
 
             if action and "tool" in action:
@@ -1254,7 +1254,7 @@ class RobustAgentExecutor:
                     messages.append(HumanMessage(content=f"Observation: {observation}"))
                     working.failure_count += 1
                     if working.failure_count >= self.max_failures:
-                        return f"失败：连续调用不存在工具 {working.failure_count} �?
+                        return f"失败：连续调用不存在工具 {working.failure_count} 次"
                     continue
 
                 cache_key = self._cache_key(tool_name, tool_input)
@@ -1264,7 +1264,7 @@ class RobustAgentExecutor:
                     messages.append(HumanMessage(content=f"Observation: {observation}"))
                     working.failure_count += 1
                     if working.failure_count >= self.max_failures:
-                        return "失败：多次调用已确认失败的工�?
+                        return "失败：多次调用已确认失败的工具"
                     continue
 
                 cached = self._get_cached_tool_result(tool_name, tool_input)
@@ -1274,13 +1274,13 @@ class RobustAgentExecutor:
                         messages.append(HumanMessage(content=f"Observation: [此前已失败，跳过] {observation}"))
                         working.failure_count += 1
                         if working.failure_count >= self.max_failures:
-                            return f"失败：连�?{working.failure_count} 次工具调用失败（含缓存失败）"
+                            return f"失败：连续 {working.failure_count} 次工具调用失败（含缓存失败）"
                         continue
                 else:
                     call_sig = f"{tool_name}:{tool_input}"
                     repeat_count = sum(1 for u in used_tools[-6:] if u == call_sig)
                     if repeat_count >= 2:
-                        messages.append(HumanMessage(content="你已经重复调用同一工具多次，请立即输出 final 答案�?))
+                        messages.append(HumanMessage(content="你已经重复调用同一工具多次，请立即输出 final 答案。"))
                         continue
                     used_tools.append(call_sig)
 
@@ -1308,9 +1308,9 @@ class RobustAgentExecutor:
                         reflection = self.reflexion.reflect(
                             task["description"], tool_name, tool_input, observation, history_text
                         )
-                        logger.info(f"反�? {reflection}")
+                        logger.info(f"反思: {reflection}")
                     else:
-                        return f"失败：连�?{working.failure_count} 次工具调用失败，最后错误：{observation}"
+                        return f"失败：连续 {working.failure_count} 次工具调用失败，最后错误：{observation}"
 
                 episodic.add(step, tool_name, tool_input, observation, reflection)
                 if reflection:
@@ -1320,16 +1320,16 @@ class RobustAgentExecutor:
                 working.intermediate_results[f"{tool_name}_{step}"] = observation
             else:
                 messages.append(
-                    HumanMessage(content='请立即输�?final 答案，格式：{"final": "..."} �?Final Answer: ...')
+                    HumanMessage(content='请立即输出 final 答案，格式：{"final": "..."} 或 Final Answer: ...')
                 )
 
         if last_tool_result:
-            logger.info("循环结束，使用最后一次工具结果生成答�?)
-            prompt = f"根据以下信息回答问题：\n{last_tool_result}\n\n问题：{task['description']}\n答案�?
+            logger.info("循环结束，使用最后一次工具结果生成答案")
+            prompt = f"根据以下信息回答问题：\n{last_tool_result}\n\n问题：{task['description']}\n答案："
             llm = get_llm(self.model_name, keep_alive=-1)
             resp = await asyncio.to_thread(llm.invoke, [HumanMessage(content=prompt)])
             return resp.content.strip()
-        return "失败：达到最大步数或超时，且无可用工具结果�?
+        return "失败：达到最大步数或超时，且无可用工具结果。"
 
     async def _synthesize(self, user_message, working, episodic, results):
         context = "\n".join(results)
@@ -1357,7 +1357,7 @@ async def agent_endpoint(req: ChatRequest):
         return ChatResponse(response=f"Agent 运行失败: {e!s}")
 
 
-# ==================== 文档与评�?====================
+# ==================== 文档与评估 ====================
 @app.post("/add_docs")
 async def add_docs(files: list[str]):
     count = add_documents_to_store(files)
@@ -1394,7 +1394,7 @@ async def get_eval_report():
     return data
 
 
-# ==================== 健康检�?====================
+# ==================== 健康检查 ====================
 @app.get("/health")
 async def health():
     status = {"api": "ok", "timestamp": datetime.now().isoformat()}
@@ -1413,7 +1413,7 @@ async def health():
     return {"status": overall, "services": status}
 
 
-# ==================== 会话持久�?====================
+# ==================== 会话持久化 ====================
 def _session_path(sid: str) -> Path:
     return Path(settings.sessions_dir) / f"{sid}.json"
 
@@ -1428,7 +1428,7 @@ async def list_sessions():
                 sessions.append(
                     {
                         "id": data.get("id", p.stem),
-                        "title": data.get("title", "新对�?),
+                        "title": data.get("title", "新对话"),
                         "updated_at": data.get("updated_at", ""),
                         "message_count": len(data.get("messages", [])),
                     }
@@ -1476,7 +1476,7 @@ if __name__ == "__main__":
             print("嵌入模型预热成功")
             break
         except Exception as e:
-            print(f"嵌入模型预热失败，重�?{i + 1}/5: {e}")
+            print(f"嵌入模型预热失败，重试 {i + 1}/5: {e}")
             time.sleep(3)
     else:
         print("嵌入模型预热最终失败，将在第一次请求时自动重试")
@@ -1489,6 +1489,6 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"LLM {settings.ollama_deep_model} 预热失败: {e}")
 
-    print("🚀 智能助手已启动，支持�?GPU 4096 上下�?+ 三角形审�?+ ReAct Agent + HyDE + Self-RAG + Vision")
-    print(f"   - 上下文长�? {settings.ollama_context_length}")
+    print("🚀 智能助手已启动，支持全 GPU 4096 上下文 + 三角形审查 + ReAct Agent + HyDE + Self-RAG + Vision")
+    print(f"   - 上下文长度: {settings.ollama_context_length}")
     uvicorn.run(app, host=settings.host, port=settings.port)
