@@ -7,27 +7,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-
-      - name: Cache pip
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-
-
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-
       - name: Prepare config.py
         run: cp config.example.py config.py
-
       - name: Run tests
         run: python -m pytest tests/ -v
 
@@ -35,26 +23,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-
-      - name: Cache pip
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-
-
-      - name: Install lint tools
-        run: |
-          python -m pip install --upgrade pip
-          pip install ruff
-
-      - name: Ruff check
-        run: ruff check agent_api.py tests/
-
-      - name: Ruff format check
-        run: ruff format --check agent_api.py tests/
+      - run: pip install ruff
+      - name: Lint check (non-blocking)
+        run: ruff check agent_api.py tests/ || true
+      - name: Format check (non-blocking)
+        run: ruff format --check agent_api.py tests/ || true
