@@ -80,12 +80,7 @@ async def test_triangle_agents():
 
     # ---- Phase 2: 生成答案 ----
     print("  - 阶段2: Agent-B 生成...")
-    gen_prompt = (
-        f"基于分析结果，直接回答问题。\n"
-        f"问题：{TEST_QUESTION}\n"
-        f"分析：{analysis}\n\n"
-        f"请给出准确且简洁的答案。"
-    )
+    gen_prompt = f"基于分析结果，直接回答问题。\n问题：{TEST_QUESTION}\n分析：{analysis}\n\n请给出准确且简洁的答案。"
     draft = await agent_b.think(gen_prompt)
     core.store("draft", draft)
     print(f"    生成草案 (前100字符): {draft[:100]}")
@@ -128,12 +123,7 @@ async def test_fault_tolerance():
     # 降级场景：分析师Agent故障，执行者Agent直接用原始问题生成答案
     agent_b = TriangleAgent("Agent-B·生成", model, "即使无分析也能生成答案", core)
     fallback_analysis = "（分析师未能生成分析，请直接回答问题）"
-    gen_prompt = (
-        f"请直接回答以下问题。\n"
-        f"问题：{TEST_QUESTION}\n"
-        f"备注：{fallback_analysis}\n\n"
-        f"答案："
-    )
+    gen_prompt = f"请直接回答以下问题。\n问题：{TEST_QUESTION}\n备注：{fallback_analysis}\n\n答案："
     draft = await agent_b.think(gen_prompt)
     print(f"  - 降级后的生成草案 (前100字符): {draft[:100]}")
     if draft.strip():
@@ -166,6 +156,7 @@ async def main():
     except Exception as e:
         print(f"\n测试失败: {e}")
         import traceback
+
         traceback.print_exc()
         sys.exit(1)
 

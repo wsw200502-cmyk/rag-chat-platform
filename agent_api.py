@@ -1,4 +1,4 @@
-﻿import asyncio
+import asyncio
 import base64
 import inspect
 import json
@@ -15,7 +15,6 @@ from typing import Any, List
 
 import requests
 import uvicorn
-from config import get_settings
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -28,6 +27,8 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from pydantic import BaseModel
 from rank_bm25 import BM25Okapi
 from sentence_transformers import CrossEncoder
+
+from config import get_settings
 
 settings = get_settings()
 
@@ -83,16 +84,18 @@ def normalize_model_name(name: str) -> str:
     }
     return mapping.get(name, name)
 
+
 # ==================== 模型缓存 & 显存管理 ====================
 llm_cache = {}
 _active_model_key = None
+
 
 def get_llm(model_name: str, keep_alive: int = -1):
     """获取LLM，支持显存管理：8G显存一次只常驻一个模型"""
     global _active_model_key
     model_name = normalize_model_name(model_name)
     cache_key = (model_name, keep_alive)
-    
+
     if keep_alive == -1 and _active_model_key != cache_key and _active_model_key is not None:
         logger.info(f"显存管理: 释放之前常驻模型 {_active_model_key[0]}")
         try:
@@ -106,12 +109,10 @@ def get_llm(model_name: str, keep_alive: int = -1):
             logger.debug(f"释放模型显存时出错: {e}")
         if _active_model_key in llm_cache:
             del llm_cache[_active_model_key]
-    
+
     if cache_key not in llm_cache:
         logger.info(f"初始化模型: {model_name} (keep_alive={keep_alive})")
-        llm_cache[cache_key] = __import__(
-            "langchain_ollama", fromlist=["ChatOllama"]
-        ).ChatOllama(
+        llm_cache[cache_key] = __import__("langchain_ollama", fromlist=["ChatOllama"]).ChatOllama(
             model=model_name,
             temperature=0,
             base_url=settings.ollama_base_url,
@@ -119,10 +120,11 @@ def get_llm(model_name: str, keep_alive: int = -1):
             num_ctx=settings.ollama_context_length,
             keep_alive=keep_alive,
         )
-    
+
     if keep_alive == -1:
         _active_model_key = cache_key
     return llm_cache[cache_key]
+
 
 # ==================== 自定义 Embedding ====================
 class OllamaEmbeddingDirect:
@@ -150,6 +152,7 @@ class OllamaEmbeddingDirect:
     def embed_query(self, text: str) -> List[float]:
         return self._call(text)
 
+
 embedding = OllamaEmbeddingDirect()
 
 # ==================== 向量数据库 ====================
@@ -168,6 +171,7 @@ else:
 global_documents_text: list[str] = []
 bm25_index = None
 
+
 def rebuild_bm25():
     global bm25_index
     if global_documents_text:
@@ -176,8 +180,10 @@ def rebuild_bm25():
     else:
         bm25_index = None
 
+
 # ==================== Reranker ====================
 reranker = None
+
 
 def get_reranker():
     global reranker
@@ -188,6 +194,7 @@ def get_reranker():
             trust_remote_code=True,
         )
     return reranker
+
 
 # ==================== 文档导入 ====================
 def add_documents_to_store(file_paths: list[str]) -> int:
@@ -205,6 +212,7 @@ def add_documents_to_store(file_paths: list[str]) -> int:
     global_documents_text.extend([chunk.page_content for chunk in chunks])
     rebuild_bm25()
     return len(chunks)
+
 
 # ==================== 混合检索 + Rerank ====================
 def retrieve_with_hybrid_and_rerank(
@@ -248,6 +256,7 @@ def retrieve_with_hybrid_and_rerank(
     sorted_indices = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:final_k]
     return [list(all_docs)[i] for i in sorted_indices]
 
+
 # ==================== 构建消息列表 ====================
 def build_messages(
     question: str,
@@ -290,6 +299,7 @@ def build_messages(
     messages.append(HumanMessage(content=f"{context}\n\n用户问题：{question}"))
     return messages
 
+
 # ==================== 后处理 ====================
 def post_process(content: str, question: str) -> str:
     content = re.sub(r"^ython\b", r"```python", content, flags=re.MULTILINE)
@@ -314,6 +324,7 @@ def post_process(content: str, question: str) -> str:
             return re.sub(r"```.*?```", "", content, flags=re.DOTALL).strip()
     return content
 
+
 # ==================== 非流式接口 ====================
 def generate_answer(
     question: str,
@@ -326,6 +337,7 @@ def generate_answer(
     llm = get_llm(model_name, keep_alive=keep_alive)
     response = llm.invoke(messages)
     return post_process(response.content, question)
+
 
 # ==================== 多模型协作 ====================
 def generate_collaborative(question: str, history: list[dict[str, str]]) -> str:
@@ -347,6 +359,7 @@ def generate_collaborative(question: str, history: list[dict[str, str]]) -> str:
     final_response = executor.invoke(messages)
     return final_response.content
 
+
 # ==================== FastAPI ====================
 app = FastAPI(title="AI Assistant (RAG + Agent + HyDE + Self-RAG + Vision)")
 
@@ -358,14 +371,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 class ChatRequest(BaseModel):
     message: str
     model: str = None
     history: list[dict[str, str]] = []
     models: list[str] | None = None
 
+
 class ChatResponse(BaseModel):
     response: str
+
 
 # ==================== 原有路由 ====================
 @app.post("/chat", response_model=ChatResponse)
@@ -373,6 +389,7 @@ async def chat(req: ChatRequest):
     model = normalize_model_name(req.model or settings.ollama_default_model)
     answer = generate_answer(req.message, req.history, model)
     return ChatResponse(response=answer)
+
 
 @app.post("/chat/stream")
 async def chat_stream(req: ChatRequest):
@@ -395,10 +412,12 @@ async def chat_stream(req: ChatRequest):
 
     return StreamingResponse(event_stream(), media_type="text/event-stream; charset=utf-8")
 
+
 @app.post("/chat/multi")
 async def chat_multi(req: ChatRequest):
     answer = generate_collaborative(req.message, req.history)
     return ChatResponse(response=answer)
+
 
 # ==================== 三角形多Agent协作架构（内切圆共享核心） ====================
 class SharedCore:
@@ -422,7 +441,7 @@ class SharedCore:
             return f"网络搜索失败: {e}"
 
     def use_tool(self, tool_name: str, tool_input: str) -> str:
-        tool = tool_registry.get_tool(tool_name) if 'tool_registry' in globals() else None
+        tool = tool_registry.get_tool(tool_name) if "tool_registry" in globals() else None
         if not tool:
             return f"错误：未找到工具 '{tool_name}'"
         try:
@@ -447,7 +466,8 @@ class SharedCore:
         return self.memory.get(key, default)
 
     def get_tool_descriptions(self) -> str:
-        return tool_registry.get_all_descriptions() if 'tool_registry' in globals() else ""
+        return tool_registry.get_all_descriptions() if "tool_registry" in globals() else ""
+
 
 class TriangleAgent:
     def __init__(self, name: str, model_name: str, role_desc: str, core: SharedCore):
@@ -459,11 +479,13 @@ class TriangleAgent:
     async def think(self, instruction: str, history: list[dict] = None, max_retries: int = 3) -> str:
         llm = get_llm(self.model_name, keep_alive=-1)
         messages = [
-            SystemMessage(content=(
-                f"你是 {self.name}。\n"
-                f"角色定位：{self.role_desc}\n"
-                f"当前日期：{datetime.now().strftime('%Y年%m月%d日')}"
-            ))
+            SystemMessage(
+                content=(
+                    f"你是 {self.name}。\n"
+                    f"角色定位：{self.role_desc}\n"
+                    f"当前日期：{datetime.now().strftime('%Y年%m月%d日')}"
+                )
+            )
         ]
         if history:
             for h in history[-6:]:
@@ -482,7 +504,7 @@ class TriangleAgent:
             except Exception as e:
                 if "502" in str(e) and attempt < max_retries - 1:
                     wait_time = 2**attempt + 10
-                    logger.warning(f"[{self.name}] LLM 502，等待 {wait_time}s 重试 {attempt+1}/{max_retries}")
+                    logger.warning(f"[{self.name}] LLM 502，等待 {wait_time}s 重试 {attempt + 1}/{max_retries}")
                     time.sleep(wait_time)
                 else:
                     raise e
@@ -530,6 +552,7 @@ class TriangleAgent:
         )
         return await self.think(prompt, history)
 
+
 # ==================== ToolRegistry ====================
 class ToolRegistry:
     def __init__(self):
@@ -541,6 +564,7 @@ class ToolRegistry:
             self._tools[name] = func
             self._descriptions[name] = description
             return func
+
         return decorator
 
     def get_tool(self, name: str) -> Callable | None:
@@ -549,7 +573,9 @@ class ToolRegistry:
     def get_all_descriptions(self) -> str:
         return "\n".join([f"- {name}: {desc}" for name, desc in self._descriptions.items()])
 
+
 tool_registry = ToolRegistry()
+
 
 # ==================== /chat/review 端点（含容错） ====================
 @app.post("/chat/review")
@@ -560,7 +586,7 @@ async def chat_review(req: ChatRequest):
             break
         except Exception as e:
             if i < 4:
-                logger.warning(f"嵌入预热失败，重试 {i+1}/5: {e}")
+                logger.warning(f"嵌入预热失败，重试 {i + 1}/5: {e}")
                 time.sleep(2)
             else:
                 logger.error(f"嵌入预热最终失败: {e}")
@@ -634,7 +660,11 @@ async def chat_review(req: ChatRequest):
             f"请根据审查意见和共享资料修订答案，确保事实准确："
         )
         try:
-            final_answer = await agent_b.think(revision_prompt, req.history) if analysis else await agent_c.think(revision_prompt, req.history)
+            final_answer = (
+                await agent_b.think(revision_prompt, req.history)
+                if analysis
+                else await agent_c.think(revision_prompt, req.history)
+            )
         except:
             final_answer = draft  # 修订失败则返回原草案
         status_tag = (
@@ -657,6 +687,7 @@ async def chat_review(req: ChatRequest):
 
     return ChatResponse(response=final_answer + status_tag)
 
+
 # ==================== HyDE ====================
 def generate_hypothetical_answer(question: str, model_name: str = None) -> str:
     model_name = normalize_model_name(model_name or settings.ollama_deep_model)
@@ -667,6 +698,7 @@ def generate_hypothetical_answer(question: str, model_name: str = None) -> str:
     llm = get_llm(model_name, keep_alive=-1)
     resp = llm.invoke([HumanMessage(content=prompt)])
     return resp.content.strip()
+
 
 def hyde_retrieve_and_answer(question: str, history: list[dict[str, str]], model_name: str = None) -> str:
     model_name = normalize_model_name(model_name or settings.ollama_deep_model)
@@ -699,6 +731,7 @@ def hyde_retrieve_and_answer(question: str, history: list[dict[str, str]], model
     resp = llm.invoke(messages)
     return resp.content.strip()
 
+
 @app.post("/chat/hyde")
 async def chat_hyde(req: ChatRequest):
     try:
@@ -708,6 +741,7 @@ async def chat_hyde(req: ChatRequest):
     except Exception as e:
         logger.error(f"HyDE 请求失败: {e!s}")
         return ChatResponse(response=f"HyDE 处理失败: {e!s}")
+
 
 # ==================== Self-RAG ====================
 def should_retrieve(question: str) -> bool:
@@ -726,6 +760,7 @@ def should_retrieve(question: str) -> bool:
     lowered = question.lower().strip()
     return not any(kw in lowered for kw in chat_keywords)
 
+
 SELF_RAG_SYSTEM_PROMPT = """你是一个能够自我反思的智能助手。在回答问题时，你可以决定是否需要检索外部知识。
 请遵循以下规则：
 1. 如果不需要检索，直接回答问题。
@@ -734,6 +769,7 @@ SELF_RAG_SYSTEM_PROMPT = """你是一个能够自我反思的智能助手。在�
 4. 当你认为信息足够时，输出最终答案。
 5. 如果你认为检索到的信息无助于回答，输出 <REJECT> 并用自己的知识回答。
 """
+
 
 def self_rag_answer(
     question: str,
@@ -787,6 +823,7 @@ def self_rag_answer(
     final_response = generation_llm.invoke(messages)
     return final_response.content.strip()
 
+
 @app.post("/chat/selfrag")
 async def chat_selfrag(req: ChatRequest):
     try:
@@ -801,6 +838,7 @@ async def chat_selfrag(req: ChatRequest):
     except Exception as e:
         logger.error(f"Self-RAG 请求失败: {e!s}")
         return ChatResponse(response=f"Self-RAG 处理失败: {e!s}")
+
 
 # ==================== 视觉识别 ====================
 @app.post("/chat/vision")
@@ -835,11 +873,13 @@ async def chat_vision(
         elif role == "assistant":
             ollama_messages.append({"role": "assistant", "content": content})
 
-    ollama_messages.append({
-        "role": "user",
-        "content": message or "请描述这张图片",
-        "images": images_b64,
-    })
+    ollama_messages.append(
+        {
+            "role": "user",
+            "content": message or "请描述这张图片",
+            "images": images_b64,
+        }
+    )
 
     try:
         resp = requests.post(
@@ -862,6 +902,7 @@ async def chat_vision(
 
     return ChatResponse(response=answer)
 
+
 # ==================== ReAct Agent 模块（增强版） ====================
 @tool_registry.register("search", "搜索互联网获取实时信息，输入查询字符串")
 async def search_tool(query: str) -> str:
@@ -873,6 +914,7 @@ async def search_tool(query: str) -> str:
     except Exception as e:
         return f"搜索失败: {e!s}"
 
+
 @tool_registry.register("calculator", "执行数学计算，输入数学表达式字符串")
 def calculator(expression: str) -> str:
     try:
@@ -883,12 +925,14 @@ def calculator(expression: str) -> str:
     except Exception as e:
         return f"计算错误: {e!s}"
 
+
 @tool_registry.register("retrieve_knowledge", "检索本地知识库，输入查询字符串")
 async def retrieve_knowledge(query: str) -> str:
     docs = retrieve_with_hybrid_and_rerank(query)
     if not docs:
         return "未找到相关知识"
     return "\n".join([doc.page_content for doc in docs])
+
 
 # ==================== 记忆系统 ====================
 @dataclass
@@ -900,19 +944,23 @@ class WorkingMemory:
     last_input: str | None = None
     failure_count: int = 0
 
+
 @dataclass
 class EpisodicMemory:
     events: list[dict[str, Any]] = field(default_factory=list)
 
     def add(self, step: int, action: str, input_str: str, output: str, reflection: str = ""):
-        self.events.append({
-            "step": step,
-            "action": action,
-            "input": input_str,
-            "output": output,
-            "reflection": reflection,
-            "timestamp": time.time(),
-        })
+        self.events.append(
+            {
+                "step": step,
+                "action": action,
+                "input": input_str,
+                "output": output,
+                "reflection": reflection,
+                "timestamp": time.time(),
+            }
+        )
+
 
 @dataclass
 class LongTermMemory:
@@ -928,6 +976,7 @@ class LongTermMemory:
         stats = self.tool_effectiveness.get(tool_name, {"success": 0, "fail": 0})
         total = stats["success"] + stats["fail"]
         return stats["success"] / total if total > 0 else 0.5
+
 
 # ==================== 反思模块 ====================
 class ReflexionModule:
@@ -947,6 +996,7 @@ class ReflexionModule:
         llm = get_llm(self.model_name, keep_alive=-1)  # 复用 9B 常驻
         resp = llm.invoke([HumanMessage(content=prompt)])
         return resp.content.strip()
+
 
 # ==================== 增强版 Agent ====================
 class RobustAgentExecutor:
@@ -1005,14 +1055,16 @@ class RobustAgentExecutor:
         llm = get_llm(self.planner_model, keep_alive=-1)
         assess_resp = await asyncio.to_thread(llm.invoke, [HumanMessage(content=assess_prompt)])
         try:
-            complexity = int(''.join(filter(str.isdigit, assess_resp.content.strip()))[:1])
+            complexity = int("".join(filter(str.isdigit, assess_resp.content.strip()))[:1])
             complexity = max(1, min(5, complexity))
         except Exception:
             complexity = 2
 
         max_tasks = {1: 1, 2: 2, 3: 4, 4: 6, 5: 8}[complexity]
         self._dynamic_max_steps = {1: 3, 2: 5, 3: 8, 4: 10, 5: 12}[complexity]
-        logger.info(f"任务复杂度评级: {complexity}/5，计划子任务数: ≤{max_tasks}，单任务步数: ≤{self._dynamic_max_steps}")
+        logger.info(
+            f"任务复杂度评级: {complexity}/5，计划子任务数: ≤{max_tasks}，单任务步数: ≤{self._dynamic_max_steps}"
+        )
 
         plan_prompt = (
             f"你是任务规划专家。将用户需求拆解为 **{max_tasks} 个以内** 的原子化子任务。\n"
@@ -1067,13 +1119,15 @@ class RobustAgentExecutor:
 
         if len(topo) != len(subtasks):
             logger.warning("检测到子任务依赖存在环路，回退到单任务")
-            return [{
-                "id": 0,
-                "description": subtasks[0]["description"] if subtasks else "执行任务",
-                "depends_on": [],
-                "status": "pending",
-                "result": "",
-            }]
+            return [
+                {
+                    "id": 0,
+                    "description": subtasks[0]["description"] if subtasks else "执行任务",
+                    "depends_on": [],
+                    "status": "pending",
+                    "result": "",
+                }
+            ]
 
         seen = set()
         filtered = []
@@ -1176,7 +1230,7 @@ class RobustAgentExecutor:
         start_time = time.time()
         used_tools = []
         last_tool_result = None
-        dynamic_limit = getattr(self, '_dynamic_max_steps', self.max_steps)
+        dynamic_limit = getattr(self, "_dynamic_max_steps", self.max_steps)
 
         while step < dynamic_limit and (time.time() - start_time) < self.timeout:
             step += 1
@@ -1210,7 +1264,7 @@ class RobustAgentExecutor:
                     messages.append(HumanMessage(content=f"Observation: {observation}"))
                     working.failure_count += 1
                     if working.failure_count >= self.max_failures:
-                        return f"失败：多次调用已确认失败的工具"
+                        return "失败：多次调用已确认失败的工具"
                     continue
 
                 cached = self._get_cached_tool_result(tool_name, tool_input)
@@ -1289,7 +1343,9 @@ class RobustAgentExecutor:
         resp = llm.invoke([HumanMessage(content=prompt)])
         return resp.content.strip()
 
+
 agent_executor = RobustAgentExecutor()
+
 
 @app.post("/agent")
 async def agent_endpoint(req: ChatRequest):
@@ -1300,11 +1356,13 @@ async def agent_endpoint(req: ChatRequest):
         logger.error(f"Agent 运行失败: {e!s}")
         return ChatResponse(response=f"Agent 运行失败: {e!s}")
 
+
 # ==================== 文档与评估 ====================
 @app.post("/add_docs")
 async def add_docs(files: list[str]):
     count = add_documents_to_store(files)
     return {"status": "success", "chunks_added": count}
+
 
 @app.post("/upload_docs")
 async def upload_docs(files: list[UploadFile] = File(...)):
@@ -1319,10 +1377,12 @@ async def upload_docs(files: list[UploadFile] = File(...)):
     count = add_documents_to_store(saved_paths)
     return {"status": "success", "chunks_added": count, "files": [Path(p).name for p in saved_paths]}
 
+
 @app.post("/retrieve")
 async def retrieve_contexts(query: str):
     docs = retrieve_with_hybrid_and_rerank(query)
     return {"contexts": [doc.page_content for doc in docs]}
+
 
 @app.get("/eval/report")
 async def get_eval_report():
@@ -1332,6 +1392,7 @@ async def get_eval_report():
     with open(eval_path, "r", encoding="utf-8") as f:
         data = json.load(f)
     return data
+
 
 # ==================== 健康检查 ====================
 @app.get("/health")
@@ -1351,9 +1412,11 @@ async def health():
     overall = "ok" if status["ollama"] == "ok" and status["chroma"] == "ok" else "degraded"
     return {"status": overall, "services": status}
 
+
 # ==================== 会话持久化 ====================
 def _session_path(sid: str) -> Path:
     return Path(settings.sessions_dir) / f"{sid}.json"
+
 
 @app.get("/sessions")
 async def list_sessions():
@@ -1362,15 +1425,18 @@ async def list_sessions():
         try:
             with open(p, "r", encoding="utf-8") as f:
                 data = json.load(f)
-                sessions.append({
-                    "id": data.get("id", p.stem),
-                    "title": data.get("title", "新对话"),
-                    "updated_at": data.get("updated_at", ""),
-                    "message_count": len(data.get("messages", []))
-                })
+                sessions.append(
+                    {
+                        "id": data.get("id", p.stem),
+                        "title": data.get("title", "新对话"),
+                        "updated_at": data.get("updated_at", ""),
+                        "message_count": len(data.get("messages", [])),
+                    }
+                )
         except Exception:
             continue
     return sorted(sessions, key=lambda x: x.get("updated_at", ""), reverse=True)
+
 
 @app.get("/sessions/{sid}")
 async def get_session(sid: str):
@@ -1380,6 +1446,7 @@ async def get_session(sid: str):
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
 
+
 @app.post("/sessions/{sid}")
 async def save_session(sid: str, body: dict):
     path = _session_path(sid)
@@ -1388,12 +1455,14 @@ async def save_session(sid: str, body: dict):
         json.dump(body, f, ensure_ascii=False, indent=2)
     return {"status": "saved"}
 
+
 @app.delete("/sessions/{sid}")
 async def delete_session_api(sid: str):
     path = _session_path(sid)
     if path.exists():
         path.unlink()
     return {"status": "deleted"}
+
 
 # ==================== 启动 ====================
 if __name__ == "__main__":
