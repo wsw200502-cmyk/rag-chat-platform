@@ -4,7 +4,7 @@
 
 测试目标：
 1. 内切圆（SharedCore）检索与工具调用
-2. 三角形三个顶点（Agent-A/B/C）的顺序协作
+2. 三角形三个顶点（Agent-A/B/C）的顺序协作（使用简化Prompt确保输出）
 3. 共享核心数据传递（分析→生成→审查）
 4. 容错能力（模拟 Agent 失败后的降级）
 
@@ -19,6 +19,9 @@ import asyncio
 import sys
 from pathlib import Path
 
+import pytest
+import requests
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from agent_api import (
@@ -29,9 +32,17 @@ from agent_api import (
     settings,
 )
 
-# 选择一个需要简单推理但模型不会拒绝回答的问题
 TEST_QUESTION = "法国首都是什么？请简要回答。"
 TEST_HISTORY = []
+
+
+def _ollama_available():
+    """检查 Ollama 服务是否可用"""
+    try:
+        r = requests.get("http://127.0.0.1:11434/api/tags", timeout=2)
+        return r.status_code == 200
+    except Exception:
+        return False
 
 
 async def test_shared_core():
@@ -57,6 +68,7 @@ async def test_shared_core():
     print("  ✓ 内切圆功能正常")
 
 
+@pytest.mark.skipif(not _ollama_available(), reason="Ollama 服务不可用，跳过三角形 Agent 测试")
 async def test_triangle_agents():
     """使用简化Prompt进行三角形协作测试"""
     print("\n[Test 2] 三角形 Agent 顺序协作测试（简化Prompt）...")
@@ -70,10 +82,7 @@ async def test_triangle_agents():
 
     # ---- Phase 1: 分析 ----
     print("  - 阶段1: Agent-A 分析...")
-    analysis_prompt = (
-        f"请对以下问题进行简要分析，指出回答该问题需要确认的关键事实。问题：{TEST_QUESTION}\n"
-        f"只需输出关键点，不要多余内容。"
-    )
+    analysis_prompt = f"请对以下问题进行简要分析，指出回答该问题需要确认的关键事实。问题：{TEST_QUESTION}\n只需输出关键点，不要多余内容。"
     analysis = await agent_a.think(analysis_prompt)
     core.store("analysis", analysis)
     print(f"    分析结果 (前100字符): {analysis[:100]}")
@@ -87,12 +96,7 @@ async def test_triangle_agents():
 
     # ---- Phase 3: 审查 ----
     print("  - 阶段3: Agent-C 审查...")
-    review_prompt = (
-        f"请审查以下答案是否准确、完整。\n"
-        f"问题：{TEST_QUESTION}\n"
-        f"答案：{draft}\n\n"
-        f"如果准确无误，请回复“VERIFIED”；否则回复“REVISION: 具体问题”。"
-    )
+    review_prompt = f"请审查以下答案是否准确、完整。\n问题：{TEST_QUESTION}\n答案：{draft}\n\n如果准确无误，请回复“VERIFIED”；否则回复“REVISION: 具体问题”。"
     review = await agent_c.think(review_prompt)
     core.store("review", review)
     print(f"    审查结论 (前100字符): {review[:100]}")
@@ -106,6 +110,7 @@ async def test_triangle_agents():
         print("  ✗ 生成答案为空，测试失败")
 
 
+@pytest.mark.skipif(not _ollama_available(), reason="Ollama 服务不可用，跳过容错测试")
 async def test_fault_tolerance():
     """测试单 Agent 故障时的降级能力"""
     print("\n[Test 3] 容错降级测试...")
@@ -140,11 +145,14 @@ async def main():
     print("=" * 60)
 
     try:
-        # 预热模型
-        print("预热深度模型（约需数秒）...")
-        llm = get_llm(settings.ollama_deep_model, keep_alive=-1)
-        _ = llm.invoke([{"role": "user", "content": "ping"}])
-        print("模型预热完成\n")
+        # 预热模型（仅在 Ollama 可用时进行）
+        if _ollama_available():
+            print("预热深度模型（约需数秒）...")
+            llm = get_llm(settings.ollama_deep_model, keep_alive=-1)
+            _ = llm.invoke([{"role": "user", "content": "ping"}])
+            print("模型预热完成\n")
+        else:
+            print("Ollama 不可用，跳过模型预热\n")
 
         await test_shared_core()
         await test_triangle_agents()
